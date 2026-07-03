@@ -68,15 +68,33 @@ Cluster boards into comp families:
 - Two boards are similar when Jaccard(hero_set) >= 0.55, or when they share the same main bond and at least one carry.
 - Merge small neighboring groups when they share core carries and main bond.
 - Do not force every board into a meta comp; leave noisy boards as mixed.
+- Name comp families from family-level trait distribution, not a single-board vote.
+- If activated traits are mostly first-threshold traits and no stable carry trait leads, label the comp as `拼多多 / carry1+carry2`.
+- Force the label bond into `common_bonds` when a bond label is used.
+- Split large families into high-tier bond subfamilies when sample size is sufficient, e.g. `考古社-7`.
+- Merge duplicate comp rows into strategy-level models when they share core carries and compatible main/sub bond traits. Keep lower-tier forms as `transition_stages` under the mature strategy.
 
 For each comp family, report:
 
 - Representative 7/8/9-level hero lists from best-ranked samples.
 - Main carry and alternate carry.
 - Main carry minimum star recommendation, median top4 stars, and three-item coverage.
+- For 4-cost and 5-cost carries, cap normal star recommendation at 2 stars. If 3-star high-cost samples dominate, mark the comp as high-cost ceiling dependent instead of recommending 3 stars.
 - Key carry equipment: mark only sufficiently supported items as required; otherwise label as high-value or observation.
 - Core bond tiers and common sub-bonds.
 - Average rank, top4 rate, win rate, sample size, confidence.
+- Mature stage and transition stages. Transition stages contribute to formation difficulty and trap analysis but should not become separate top-level recommendations when they are the same strategy.
+
+### Play Style Split
+
+Every player board and merged strategy should be classified as either `赌狗` or `高费`.
+
+- `level <= 6`: always `赌狗`.
+- `level >= 8` with no 1/2/3-cost 3-star unit: `高费`.
+- `level == 7`: low-cost main carry means `赌狗`; otherwise `高费`.
+- Remaining edge cases: low-cost 3-star main carry means `赌狗`; otherwise `高费`.
+
+Keep a `play_style_breakdown` on strategy rows because merged strategies can contain mixed stage samples. Recommendation sections should be split by final strategy `play_style`, while global difficulty, popularity, trap, hero, equipment, and card analysis can still use all strategies.
 
 ## Formation Difficulty And Popularity
 
@@ -122,7 +140,26 @@ For each hero:
 - common equipment, normalized by selected/non-selected name.
 - selected-rate and selected-priority.
 - required/high-value equipment notes when with-item performance clearly beats without-item performance.
+- Sort main equipment recommendations by sample size first, then adjusted rank/top4. Low-sample high-roll items belong in an observation note.
 - common 3-item sets when enough complete samples exist.
+
+## Jiujiu Analysis
+
+For every observed `X啾啾`:
+
+- classify each sample as `final_bond`, `hero_boost`, `generalist`, or `incidental`.
+- A jiujiu is effective when it is part of the final main/sub bond, significantly boosts a specific carry/frontline/key unit, or shows stable positive value across multiple strategies.
+- Rank the item by effective sample count, effective rate, adjusted avg rank, avg rank, top4 rate, and win rate.
+- Recommended comps should only come from `final_bond` or stable `generalist` evidence. `hero_boost` recommendations should name specific heroes instead of forcing a comp.
+- Keep tier-uplift data as supporting evidence only; uplift alone does not prove strength.
+
+## Strategy-Level Traps
+
+Version traps are evaluated after merging mature and transition stages:
+
+- Aggregate all stages of the same strategy and dedupe players before judging.
+- Weak transition stages are formation difficulty, not traps, when the mature stage is strong.
+- A strategy is a trap only when the full strategy remains popular and weak after considering mature plus transition results.
 
 ## Version Traps
 
@@ -150,7 +187,8 @@ Use this Markdown shape:
 
 ## 数据概览与过滤摘要
 ## 当前环境结论摘要
-## 主流强势阵容推荐
+## 赌狗阵容推荐
+## 高费阵容推荐
 ## 阵容成型难度与热门程度
 ## 卡牌强度分析
 ## 强势棋子与装备推荐
@@ -160,13 +198,10 @@ Use this Markdown shape:
 ## 数据质量与可信度说明
 ```
 
-## Xiaohongshu Template
+## HTML Poster Output
 
-Also write `data/latest_meta_analysis_xhs.md`:
+Also write `data/latest_meta_analysis_report.html`:
 
-- Short title with a clear conclusion and number.
-- Top 3 comps with carry, star requirement, key equipment, and compact 8/9-level lineup.
-- Per-comp card picks and first-card duo observations.
-- Strong heroes and equipment sorted by hero tier descending.
-- Single-card highlights and version traps.
-- Use short, conversational paragraphs and avoid long tables.
+- fixed-width poster around 1080px, designed for a 3:4 screenshot.
+- show sample summary, top strategy comps split by `赌狗`/`高费`, mature lineup, deduped transition path, carry requirements, card picks, jiujiu highlights, and structured traps.
+- do not mirror the full Markdown report; keep the HTML concise and visual.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import itertools
 import json
 import sqlite3
@@ -21,9 +22,10 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_JSON = ROOT / "data" / "latest_meta_analysis.json"
 DEFAULT_MD = ROOT / "data" / "latest_meta_analysis_report.md"
-DEFAULT_XHS_MD = ROOT / "data" / "latest_meta_analysis_xhs.md"
+DEFAULT_HTML = ROOT / "data" / "latest_meta_analysis_report.html"
 
 CARD_GRANTED_HEROES = {"暴龙虾饺"}
+PLAY_STYLES = ("赌狗", "高费")
 
 HERO_ALIASES = {
     "双面教师林野·前排": "双面教师林野",
@@ -181,6 +183,49 @@ def first_card(feature: PlayerFeature) -> str | None:
 
 def team_rank_value(feature: PlayerFeature) -> int:
     return feature.team_rank if feature.team_rank is not None else feature.rank
+
+
+def is_low_cost_hero(hero: Hero | None) -> bool:
+    return bool(hero and hero.tier is not None and hero.tier <= 3)
+
+
+def is_low_cost_three_star(hero: Hero) -> bool:
+    return is_low_cost_hero(hero) and hero.stars >= 3 and is_lineup_hero(hero.name)
+
+
+def classify_play_style(feature: PlayerFeature) -> str:
+    lineup_count = len(unique_heroes_by_slot(feature))
+    main_carry = feature.main_carry
+    has_low_cost_three_star = any(is_low_cost_three_star(hero) for hero in feature.heroes)
+    has_low_cost_three_star_main = bool(
+        main_carry and is_low_cost_three_star(main_carry)
+    )
+
+    if lineup_count <= 6:
+        return "赌狗"
+    if feature.level >= 8 and not has_low_cost_three_star:
+        return "高费"
+    if feature.level == 7:
+        return "赌狗" if is_low_cost_hero(main_carry) else "高费"
+    if has_low_cost_three_star_main:
+        return "赌狗"
+    return "高费"
+
+
+def play_style_summary(members: list[PlayerFeature]) -> tuple[str, list[dict[str, Any]]]:
+    counts = Counter(classify_play_style(member) for member in members)
+    total = len(members) or 1
+    breakdown = [
+        {
+            "play_style": style,
+            "appearances": counts.get(style, 0),
+            "share": round(counts.get(style, 0) * 100.0 / total, 1),
+        }
+        for style in PLAY_STYLES
+        if counts.get(style, 0) > 0
+    ]
+    primary = max(PLAY_STYLES, key=lambda style: (counts.get(style, 0), -PLAY_STYLES.index(style)))
+    return primary, breakdown
 
 
 def find_latest_db(explicit: Path | None) -> Path:
@@ -498,6 +543,248 @@ def is_similar_to_family(feature: PlayerFeature, members: list[PlayerFeature]) -
     return bool(feature.main_bond and feature.main_bond == representative.main_bond and shared_carry)
 
 
+def parse_trait_tier(key: str) -> tuple[str, int]:
+    trait, tier_raw = key.rsplit("-", 1)
+    return trait, int(tier_raw)
+
+
+def carry_trait_names(main_carries: list[tuple[str, int]], members: list[PlayerFeature]) -> set[str]:
+    names = {name for name, _ in main_carries[:3]}
+    traits: set[str] = set()
+    for member in members:
+        for hero in member.heroes:
+            if hero.name in names:
+                traits.update(hero.traits)
+    return traits
+
+
+def derive_family_label(
+    members: list[PlayerFeature],
+    active_bond_counter: Counter[str],
+    main_carries: list[tuple[str, int]],
+) -> dict[str, Any]:
+    _, dict_bond = load_game_config()
+    total = len(members) or 1
+    carry_traits = carry_trait_names(main_carries, members)
+    candidates = []
+    high_tier_member_count = 0
+    for member in members:
+        if any(
+            tier > min(dict_bond.get(trait, [tier]))
+            for trait, tier in member.active_traits.items()
+            if trait in dict_bond
+        ):
+            high_tier_member_count += 1
+
+    mostly_first_tier = high_tier_member_count / total < 0.5
+    for key, count in active_bond_counter.items():
+        trait, tier = parse_trait_tier(key)
+        thresholds = dict_bond.get(trait)
+        if not thresholds:
+            continue
+        share = count * 100.0 / total
+        if share < 50:
+            continue
+        first_threshold = min(thresholds)
+        second_threshold = sorted(thresholds)[1] if len(thresholds) > 1 else first_threshold
+        carry_bonus = 30 if trait in carry_traits else 0
+        score = tier * 100 + share + carry_bonus
+        candidates.append(
+            {
+                "key": key,
+                "trait": trait,
+                "tier": tier,
+                "share": round(share, 1),
+                "is_first_tier": tier <= first_threshold,
+                "carry_aligned": trait in carry_traits,
+                "score": score,
+                "is_high_tier": tier >= second_threshold,
+            }
+        )
+
+    if not candidates:
+        return {
+            "key": "拼多多",
+            "label_trait": "拼多多",
+            "label_confidence": "低",
+            "label_reason": "没有稳定占比足够的主羁绊",
+        }
+
+    candidates.sort(key=lambda item: (item["score"], item["share"]), reverse=True)
+    best = candidates[0]
+    if mostly_first_tier and not (best["carry_aligned"] and best["share"] >= 65):
+        return {
+            "key": "拼多多",
+            "label_trait": "拼多多",
+            "label_confidence": "中",
+            "label_reason": "激活羁绊主要停留在第一档，按拼多多处理",
+        }
+
+    return {
+        "key": best["key"],
+        "label_trait": best["trait"],
+        "label_confidence": "高" if best["share"] >= 60 else "中",
+        "label_reason": "主C羁绊主导" if best["carry_aligned"] else "家族稳定高占比羁绊",
+        "label_share": best["share"],
+    }
+
+
+def composition_recommendation_score(row: dict[str, Any]) -> float:
+    stats = row["stats"]
+    n = stats["appearances"]
+    score = stats["avg_rank"]
+    score -= min(n, 80) / 80.0 * 0.35
+    score -= stats["top4_rate"] / 100.0 * 0.25
+    score -= row["popularity"]["match_share"] / 100.0 * 0.15
+    if n < 10:
+        score += 1.8
+    elif n < 15:
+        score += 0.8
+    elif n < 25:
+        score += 0.25
+    if row.get("high_cost_three_star_dependency"):
+        score += 0.45
+    return round(score, 4)
+
+
+def build_composition_row(
+    members: list[PlayerFeature],
+    family_id: int,
+    total_players: int,
+    total_matches: int,
+    *,
+    is_subfamily: bool = False,
+    subfamily_key: str | None = None,
+) -> dict[str, Any]:
+    stats = RankStats()
+    hero_counter: Counter[str] = Counter()
+    carry_counter: Counter[str] = Counter()
+    active_bond_counter: Counter[str] = Counter()
+    for member in members:
+        stats.add(member.rank)
+        hero_counter.update(member.hero_set)
+        if member.main_carry:
+            carry_counter[member.main_carry.name] += 1
+        for trait, tier in member.active_traits.items():
+            active_bond_counter[f"{trait}-{tier}"] += 1
+
+    match_counts = Counter(member.match_id for member in members)
+    avg_contest = sum(match_counts.values()) / len(match_counts)
+    unfinished = 0
+    carry_complete = 0
+    for member in members:
+        carry = member.main_carry
+        if carry and carry.equipment_count >= 3:
+            carry_complete += 1
+        if member.rank > 4 and carry and (carry.equipment_count < 3 or carry.stars < 2):
+            unfinished += 1
+
+    unfinished_rate = unfinished * 100.0 / len(members)
+    carry_complete_rate = carry_complete * 100.0 / len(members)
+    difficulty_score = (
+        (unfinished_rate / 100.0) * 0.5
+        + min(avg_contest / 3.0, 1.0) * 0.3
+        + (1.0 - carry_complete_rate / 100.0) * 0.2
+    )
+    difficulty = "高" if difficulty_score >= 0.58 else "中" if difficulty_score >= 0.34 else "低"
+    pick_rate = len(members) * 100.0 / total_players
+    match_share = len(match_counts) * 100.0 / total_matches
+    popularity_score = pick_rate / 20.0 + avg_contest / 3.0 + match_share / 80.0
+    popularity = "高" if popularity_score >= 1.5 else "中" if popularity_score >= 0.8 else "低"
+
+    variants = build_level_variants(members, hero_counter)
+    top_bonds = active_bond_counter.most_common(8)
+    main_carries = carry_counter.most_common(3)
+    label_info = derive_family_label(members, active_bond_counter, main_carries)
+    main_bond = subfamily_key or label_info["key"]
+    if subfamily_key:
+        label_info = {
+            **label_info,
+            "key": subfamily_key,
+            "label_trait": parse_trait_tier(subfamily_key)[0],
+            "label_confidence": "高",
+            "label_reason": "样本充足的高档羁绊子形态",
+        }
+    if main_bond != "拼多多" and main_bond not in {key for key, _ in top_bonds}:
+        top_bonds.append((main_bond, sum(1 for member in members if main_bond in {
+            f"{trait}-{tier}" for trait, tier in member.active_traits.items()
+        })))
+    common_bonds = [
+        {"bond": bond, "share": round(count * 100.0 / len(members), 1)}
+        for bond, count in top_bonds[:8]
+        if count > 0
+    ]
+    play_style, play_style_breakdown = play_style_summary(members)
+    carry_requirements = summarize_carry_requirements(members, main_carries)
+    carry_equipment_notes = summarize_comp_carry_equipment(members, main_carries)
+    high_cost_three_star_dependency = any(
+        row.get("high_cost_three_star_dependency") for row in carry_requirements
+    )
+    carry_label = "+".join(name for name, _ in main_carries[:2]) or "无核心"
+    row = {
+        "family_id": family_id,
+        "label": f"{main_bond} / {carry_label}",
+        "main_bond": main_bond,
+        "is_subfamily": is_subfamily,
+        "subfamily_key": subfamily_key,
+        "label_confidence": label_info.get("label_confidence", "中"),
+        "label_reason": label_info.get("label_reason", ""),
+        "main_carries": [
+            {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
+            for name, count in main_carries
+        ],
+        "core_heroes": [
+            {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
+            for name, count in hero_counter.most_common(10)
+        ],
+        "common_bonds": common_bonds,
+        "play_style": play_style,
+        "play_style_breakdown": play_style_breakdown,
+        "variants": variants,
+        "carry_requirements": carry_requirements,
+        "carry_equipment_notes": carry_equipment_notes,
+        "stats": stats.to_dict(),
+        "difficulty": {
+            "label": difficulty,
+            "unfinished_bottom_rate": round(unfinished_rate, 1),
+            "carry_complete_rate": round(carry_complete_rate, 1),
+            "avg_same_match_contest": round(avg_contest, 2),
+        },
+        "popularity": {
+            "label": popularity,
+            "pick_rate": round(pick_rate, 1),
+            "match_share": round(match_share, 1),
+            "avg_same_match_contest": round(avg_contest, 2),
+        },
+        "confidence": confidence_label(len(members)),
+        "member_player_ids": [member.player_id for member in members],
+        "high_cost_three_star_dependency": high_cost_three_star_dependency,
+    }
+    row["recommendation_score"] = composition_recommendation_score(row)
+    return row
+
+
+def high_tier_subgroups(
+    members: list[PlayerFeature],
+    min_apps: int,
+) -> list[tuple[str, list[PlayerFeature]]]:
+    _, dict_bond = load_game_config()
+    by_key: dict[str, list[PlayerFeature]] = defaultdict(list)
+    for member in members:
+        for trait, tier in member.active_traits.items():
+            thresholds = sorted(dict_bond.get(trait, []))
+            if len(thresholds) < 2:
+                continue
+            if tier >= thresholds[1]:
+                by_key[f"{trait}-{tier}"].append(member)
+    result = []
+    for key, rows in by_key.items():
+        if len(rows) >= max(15, min_apps * 2) and len(rows) < len(members) * 0.92:
+            result.append((key, rows))
+    result.sort(key=lambda item: (-len(item[1]), item[0]))
+    return result[:4]
+
+
 def cluster_compositions(features: list[PlayerFeature], min_apps: int) -> list[dict[str, Any]]:
     candidates = [
         feature
@@ -524,100 +811,146 @@ def cluster_compositions(features: list[PlayerFeature], min_apps: int) -> list[d
             continue
         for member in members:
             member.family_id = family_id
-
-        stats = RankStats()
-        hero_counter: Counter[str] = Counter()
-        carry_counter: Counter[str] = Counter()
-        bond_counter: Counter[str] = Counter()
-        active_bond_counter: Counter[str] = Counter()
-        for member in members:
-            stats.add(member.rank)
-            hero_counter.update(member.hero_set)
-            if member.main_carry:
-                carry_counter[member.main_carry.name] += 1
-            if member.main_bond:
-                tier = member.active_traits.get(member.main_bond, 0)
-                bond_counter[f"{member.main_bond}-{tier}"] += 1
-            for trait, tier in member.active_traits.items():
-                active_bond_counter[f"{trait}-{tier}"] += 1
-
-        match_counts = Counter(member.match_id for member in members)
-        avg_contest = sum(match_counts.values()) / len(match_counts)
-        unfinished = 0
-        carry_complete = 0
-        for member in members:
-            carry = member.main_carry
-            if carry and carry.equipment_count >= 3:
-                carry_complete += 1
-            if member.rank > 4 and carry and (carry.equipment_count < 3 or carry.stars < 2):
-                unfinished += 1
-
-        unfinished_rate = unfinished * 100.0 / len(members)
-        carry_complete_rate = carry_complete * 100.0 / len(members)
-        difficulty_score = (
-            (unfinished_rate / 100.0) * 0.5
-            + min(avg_contest / 3.0, 1.0) * 0.3
-            + (1.0 - carry_complete_rate / 100.0) * 0.2
-        )
-        difficulty = "高" if difficulty_score >= 0.58 else "中" if difficulty_score >= 0.34 else "低"
-        pick_rate = len(members) * 100.0 / total_players
-        match_share = len(match_counts) * 100.0 / total_matches
-        popularity_score = pick_rate / 20.0 + avg_contest / 3.0 + match_share / 80.0
-        popularity = "高" if popularity_score >= 1.5 else "中" if popularity_score >= 0.8 else "低"
-
-        variants = build_level_variants(members, hero_counter)
-        top_bonds = active_bond_counter.most_common(6)
-        main_bond = bond_counter.most_common(1)[0][0] if bond_counter else "无主羁绊"
-        main_carries = carry_counter.most_common(3)
-        carry_requirements = summarize_carry_requirements(members, main_carries)
-        carry_equipment_notes = summarize_comp_carry_equipment(members, main_carries)
-        output.append(
-            {
-                "family_id": family_id,
-                "label": f"{main_bond} / {'+'.join(name for name, _ in main_carries[:2]) or '无核心'}",
-                "main_bond": main_bond,
-                "main_carries": [
-                    {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
-                    for name, count in main_carries
-                ],
-                "core_heroes": [
-                    {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
-                    for name, count in hero_counter.most_common(10)
-                ],
-                "common_bonds": [
-                    {"bond": bond, "share": round(count * 100.0 / len(members), 1)}
-                    for bond, count in top_bonds
-                ],
-                "variants": variants,
-                "carry_requirements": carry_requirements,
-                "carry_equipment_notes": carry_equipment_notes,
-                "stats": stats.to_dict(),
-                "difficulty": {
-                    "label": difficulty,
-                    "unfinished_bottom_rate": round(unfinished_rate, 1),
-                    "carry_complete_rate": round(carry_complete_rate, 1),
-                    "avg_same_match_contest": round(avg_contest, 2),
-                },
-                "popularity": {
-                    "label": popularity,
-                    "pick_rate": round(pick_rate, 1),
-                    "match_share": round(match_share, 1),
-                    "avg_same_match_contest": round(avg_contest, 2),
-                },
-                "confidence": confidence_label(len(members)),
-                "member_player_ids": [member.player_id for member in members],
-            }
-        )
+        base_row = build_composition_row(members, family_id, total_players, total_matches)
+        output.append(base_row)
         family_id += 1
+        for sub_key, sub_members in high_tier_subgroups(members, min_apps):
+            if sub_key == base_row["main_bond"]:
+                continue
+            output.append(
+                build_composition_row(
+                    sub_members,
+                    family_id,
+                    total_players,
+                    total_matches,
+                    is_subfamily=True,
+                    subfamily_key=sub_key,
+                )
+            )
+            family_id += 1
 
     output.sort(
         key=lambda row: (
-            row["stats"]["avg_rank"],
-            -row["stats"]["top4_rate"],
+            row["recommendation_score"],
             -row["stats"]["appearances"],
+            row["stats"]["avg_rank"],
         )
     )
     return output
+
+
+def trait_name_from_bond_key(key: str) -> str:
+    if key == "拼多多":
+        return key
+    return parse_trait_tier(key)[0]
+
+
+def strategy_carry_key(row: dict[str, Any]) -> str:
+    names = sorted(item["hero_name"] for item in row.get("main_carries", [])[:2])
+    return "+".join(names) or row["label"]
+
+
+def bond_stage_score(row: dict[str, Any]) -> tuple[int, int, float, int]:
+    key = row.get("main_bond", "")
+    tier = 0
+    if key and key != "拼多多" and "-" in key:
+        _, tier = parse_trait_tier(key)
+    return (tier, row["stats"]["appearances"], row["stats"]["top4_rate"], -int(row["stats"]["avg_rank"] * 100))
+
+
+def merge_comp_strategies(
+    comp_rows: list[dict[str, Any]],
+    features: list[PlayerFeature],
+) -> list[dict[str, Any]]:
+    player_by_id = {feature.player_id: feature for feature in features}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in comp_rows:
+        grouped[strategy_carry_key(row)].append(row)
+
+    strategies: list[dict[str, Any]] = []
+    strategy_index = 1
+    for carry_key, rows in grouped.items():
+        member_ids = sorted({pid for row in rows for pid in row["member_player_ids"]})
+        members = [player_by_id[pid] for pid in member_ids if pid in player_by_id]
+        if not members:
+            continue
+        mature = sorted(
+            rows,
+            key=lambda row: (bond_stage_score(row), -row["recommendation_score"]),
+            reverse=True,
+        )[0]
+        transition_rows = [
+            {
+                "label": row["label"],
+                "bond": row["main_bond"],
+                "role": "大成" if row is mature else "过渡",
+                "stats": row["stats"],
+                "difficulty": row["difficulty"],
+                "popularity": row["popularity"],
+                "play_style": row.get("play_style", "高费"),
+                "play_style_breakdown": row.get("play_style_breakdown", []),
+                "member_player_ids": row["member_player_ids"],
+                "recommendation_score": row["recommendation_score"],
+            }
+            for row in sorted(rows, key=lambda row: bond_stage_score(row), reverse=True)
+        ]
+        aggregate = build_composition_row(
+            members,
+            strategy_index,
+            len(features) or 1,
+            len({feature.match_id for feature in features}) or 1,
+        )
+        strategy_id = f"{trait_name_from_bond_key(mature['main_bond'])}|{carry_key}"
+        aggregate.update(
+            {
+                "strategy_id": strategy_id,
+                "family_id": strategy_index,
+                "label": f"{mature['main_bond']} / {carry_key}",
+                "main_bond": mature["main_bond"],
+                "mature_stage": {
+                    "label": mature["label"],
+                    "bond": mature["main_bond"],
+                    "stats": mature["stats"],
+                    "variants": mature["variants"],
+                    "play_style": mature.get("play_style", aggregate.get("play_style", "高费")),
+                    "play_style_breakdown": mature.get("play_style_breakdown", []),
+                    "carry_requirements": mature.get("carry_requirements", []),
+                    "carry_equipment_notes": mature.get("carry_equipment_notes", []),
+                },
+                "transition_stages": transition_rows,
+                "aggregate_stats": aggregate["stats"],
+                "stats": aggregate["stats"],
+                "variants": mature["variants"],
+                "carry_requirements": mature.get("carry_requirements", aggregate.get("carry_requirements", [])),
+                "carry_equipment_notes": mature.get("carry_equipment_notes", aggregate.get("carry_equipment_notes", [])),
+                "member_player_ids": member_ids,
+                "strategy_stage_count": len(rows),
+            }
+        )
+        aggregate["recommendation_score"] = composition_recommendation_score(aggregate)
+        strategies.append(aggregate)
+        for feature in members:
+            feature.family_id = strategy_index
+        strategy_index += 1
+
+    strategies.sort(
+        key=lambda row: (
+            row["recommendation_score"],
+            -row["aggregate_stats"]["appearances"],
+            row["aggregate_stats"]["avg_rank"],
+        )
+    )
+    return strategies
+
+
+def build_composition_recommendations(
+    comp_rows: list[dict[str, Any]],
+    limit: int = 8,
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        style: [row for row in comp_rows if row.get("play_style") == style][:limit]
+        for style in PLAY_STYLES
+    }
 
 
 def build_level_variants(
@@ -722,16 +1055,23 @@ def summarize_carry_requirements(
             if bottom_samples
             else 0.0
         )
-        recommended_star = 3 if three_star_rate >= 45 else 2 if two_star_rate >= 60 else max(1, min(stars))
+        tier = carry_samples[0].tier or 0
+        high_cost_three_star_dependency = tier >= 4 and three_star_rate >= 45
+        if tier >= 4:
+            recommended_star = 2 if two_star_rate >= 45 else max(1, min(stars))
+        else:
+            recommended_star = 3 if three_star_rate >= 45 else 2 if two_star_rate >= 60 else max(1, min(stars))
         requirements.append(
             {
                 "hero_name": hero_name,
+                "tier": tier,
                 "share": round(count * 100.0 / len(members), 1),
                 "samples": len(carry_samples),
                 "top4_samples": len(top4_samples),
                 "min_stars_top4": min(stars),
                 "median_stars_top4": median_number(stars),
                 "recommended_min_stars": recommended_star,
+                "high_cost_three_star_dependency": high_cost_three_star_dependency,
                 "two_star_rate": round(two_star_rate, 1),
                 "three_star_rate": round(three_star_rate, 1),
                 "three_item_rate": round(three_item_rate, 1),
@@ -800,7 +1140,7 @@ def summarize_comp_carry_equipment(
             )
             if appearances >= 8 and penalty is not None and penalty >= 0.45 and with_top4 >= 60:
                 label = "疑似刚需"
-            elif penalty is not None and penalty >= 0.25:
+            elif appearances >= 8 and penalty is not None and penalty >= 0.25:
                 label = "高价值"
             else:
                 label = "观察"
@@ -821,6 +1161,7 @@ def summarize_comp_carry_equipment(
         item_rows.sort(
             key=lambda row: (
                 {"疑似刚需": 0, "高价值": 1, "观察": 2}[row["label"]],
+                -row["appearances"],
                 -(row["without_item_penalty"] or 0),
                 -row["use_rate"],
             )
@@ -1053,6 +1394,8 @@ def analyze_heroes_and_equipment(
     for hero in heroes:
         hero_name = hero["hero_name"]
         items = []
+        low_sample_items = []
+        reliable_item_min = max(8, int(hero["appearances"] * 0.05))
         for (item_hero, item_name), stat in hero_item_stats.items():
             if item_hero != hero_name or stat.appearances < max(4, min_apps // 3):
                 continue
@@ -1061,21 +1404,29 @@ def analyze_heroes_and_equipment(
                 "equipment_name": item_name,
                 **stat.to_dict(baseline_rank=baseline, prior=8),
                 "selected_rate": round(selected_rate, 1),
-                "selected_priority": selected_priority_label(selected_rate, stat.to_dict()["avg_rank"], baseline),
+                "sample_quality": "高样本" if stat.appearances >= reliable_item_min else "低样本观察",
+                "selected_priority": selected_priority_label(selected_rate, stat.to_dict()["avg_rank"], baseline)
+                if stat.appearances >= reliable_item_min
+                else "低",
             }
-            items.append(row)
+            if stat.appearances >= reliable_item_min:
+                items.append(row)
+            else:
+                low_sample_items.append(row)
         sets = []
         for (set_hero, set_name), stat in set_stats.items():
             if set_hero == hero_name and stat.appearances >= max(3, min_apps // 4):
                 sets.append({"equipment_set": set_name, **stat.to_dict(baseline_rank=baseline, prior=8)})
-        items.sort(key=lambda row: (row["adjusted_avg_rank"], -row["selected_rate"], -row["top4_rate"]))
-        sets.sort(key=lambda row: (row["adjusted_avg_rank"], -row["top4_rate"]))
-        if items:
+        items.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
+        low_sample_items.sort(key=lambda row: (row["adjusted_avg_rank"], -row["top4_rate"], -row["appearances"]))
+        sets.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
+        if items or low_sample_items:
             recommendations.append(
                 {
                     "hero_name": hero_name,
                     "hero_stats": hero,
                     "recommended_items": items[:6],
+                    "low_sample_observations": low_sample_items[:4],
                     "recommended_sets": sets[:4],
                 }
             )
@@ -1084,7 +1435,7 @@ def analyze_heroes_and_equipment(
     for item_name, stat in item_stats.items():
         if stat.appearances >= min_apps:
             equipment_rows.append({"equipment_name": item_name, **stat.to_dict(baseline_rank=baseline, prior=8)})
-    equipment_rows.sort(key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"]))
+    equipment_rows.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"]))
 
     return {
         "heroes": heroes,
@@ -1093,6 +1444,152 @@ def analyze_heroes_and_equipment(
         "bonds": aggregate_key_stats(trait_items, min_apps, baseline),
         "jiujiu_bonds": aggregate_key_stats(jiujiu_items, max(5, min_apps // 3), baseline),
     }
+
+
+def analyze_jiujiu(
+    features: list[PlayerFeature],
+    comp_rows: list[dict[str, Any]],
+    baseline: float,
+    min_apps: int = 5,
+) -> dict[str, Any]:
+    total_stats: dict[str, RankStats] = defaultdict(RankStats)
+    effective_stats: dict[str, RankStats] = defaultdict(RankStats)
+    incidental_stats: dict[str, RankStats] = defaultdict(RankStats)
+    reason_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    player_to_comps: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
+    comp_item_stats: dict[tuple[str, str], RankStats] = defaultdict(RankStats)
+    hero_item_stats: dict[tuple[str, str], RankStats] = defaultdict(RankStats)
+    item_strategy_seen: dict[str, set[str]] = defaultdict(set)
+
+    for comp in comp_rows:
+        for player_id in comp["member_player_ids"]:
+            player_to_comps[player_id].setdefault(comp["label"], comp)
+
+    pending_generalist: dict[str, list[tuple[PlayerFeature, str]]] = defaultdict(list)
+    for feature in features:
+        comp_values = list(player_to_comps.get(feature.player_id, {}).values())
+        seen_items: set[str] = set()
+        for hero in feature.heroes:
+            for equipment in hero.equipments:
+                trait = jiujiu_trait(equipment.name)
+                if not trait:
+                    continue
+                item_name = equipment.name
+                if item_name in seen_items:
+                    continue
+                seen_items.add(item_name)
+                total_stats[item_name].add(feature.rank)
+                reasons = classify_jiujiu_sample(feature, hero, item_name, trait, comp_values)
+                if reasons:
+                    for reason in reasons:
+                        reason_counts[item_name][reason] += 1
+                    effective_stats[item_name].add(feature.rank)
+                    if "final_bond" in reasons:
+                        for comp in comp_values:
+                            if jiujiu_matches_strategy_bond(trait, comp):
+                                comp_item_stats[(item_name, comp["label"])].add(feature.rank)
+                    if "hero_boost" in reasons:
+                        hero_item_stats[(item_name, hero.name)].add(feature.rank)
+                else:
+                    incidental_stats[item_name].add(feature.rank)
+                    pending_generalist[item_name].append((feature, item_name))
+                for comp in comp_values:
+                    item_strategy_seen[item_name].add(comp["label"])
+
+    baseline_rank = baseline
+    for item_name, samples in pending_generalist.items():
+        if len(item_strategy_seen[item_name]) < 4:
+            continue
+        total = total_stats[item_name]
+        if total.appearances < 12 or total.to_dict()["avg_rank"] > baseline_rank - 0.25:
+            continue
+        for feature, _ in samples:
+            reason_counts[item_name]["generalist"] += 1
+            effective_stats[item_name].add(feature.rank)
+
+    rankings = []
+    recommended: dict[str, list[dict[str, Any]]] = {}
+    hero_recommendations: dict[str, list[dict[str, Any]]] = {}
+    for item_name, stat in total_stats.items():
+        if stat.appearances < min_apps:
+            continue
+        comps = []
+        for (comp_item, comp_label), comp_stat in comp_item_stats.items():
+            if comp_item != item_name or comp_stat.appearances < 3:
+                continue
+            comps.append(
+                {
+                    "family_label": comp_label,
+                    **comp_stat.to_dict(baseline_rank=baseline, prior=6),
+                    "share": round(comp_stat.appearances * 100.0 / stat.appearances, 1),
+                }
+            )
+        comps.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
+        recommended[item_name] = comps[:4]
+        hero_rows = []
+        for (hero_item, hero_name), hero_stat in hero_item_stats.items():
+            if hero_item != item_name or hero_stat.appearances < 3:
+                continue
+            hero_rows.append(
+                {
+                    "hero_name": hero_name,
+                    **hero_stat.to_dict(baseline_rank=baseline, prior=6),
+                }
+            )
+        hero_rows.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
+        hero_recommendations[item_name] = hero_rows[:4]
+        effective = effective_stats.get(item_name, RankStats())
+        incidental = incidental_stats.get(item_name, RankStats())
+        rankings.append(
+            {
+                "equipment_name": item_name,
+                **stat.to_dict(baseline_rank=baseline, prior=8),
+                "effective_appearances": effective.appearances,
+                "effective_rate": round(effective.appearances * 100.0 / stat.appearances, 1),
+                "effective_stats": effective.to_dict(baseline_rank=baseline, prior=8) if effective.appearances else None,
+                "incidental_stats": incidental.to_dict(baseline_rank=baseline, prior=8) if incidental.appearances else None,
+                "reason_counts": dict(reason_counts[item_name]),
+                "recommended_comps": recommended[item_name],
+                "recommended_heroes": hero_recommendations[item_name],
+            }
+        )
+    rankings.sort(key=lambda row: (-row["effective_appearances"], row["effective_stats"]["adjusted_avg_rank"] if row["effective_stats"] else 99, -row["top4_rate"]))
+    return {
+        "jiujiu_rankings": rankings,
+        "jiujiu_recommended_comps": recommended,
+        "jiujiu_recommended_heroes": hero_recommendations,
+    }
+
+
+def jiujiu_matches_strategy_bond(trait: str, comp: dict[str, Any]) -> bool:
+    main_bond = comp.get("main_bond", "")
+    if main_bond != "拼多多" and "-" in main_bond and parse_trait_tier(main_bond)[0] == trait:
+        return True
+    for bond in comp.get("common_bonds", [])[:4]:
+        if "-" in bond["bond"]:
+            bond_trait, _ = parse_trait_tier(bond["bond"])
+            if bond_trait == trait and bond.get("share", 0) >= 50:
+                return True
+    return False
+
+
+def classify_jiujiu_sample(
+    feature: PlayerFeature,
+    hero: Hero,
+    item_name: str,
+    trait: str,
+    comps: list[dict[str, Any]],
+) -> list[str]:
+    reasons: list[str] = []
+    if any(jiujiu_matches_strategy_bond(trait, comp) for comp in comps):
+        reasons.append("final_bond")
+    is_key_hero = (
+        (feature.main_carry and hero.id == feature.main_carry.id)
+        or (feature.secondary_carry and hero.id == feature.secondary_carry.id)
+    )
+    if is_key_hero and feature.rank <= 4 and hero.equipment_count >= 2:
+        reasons.append("hero_boost")
+    return reasons
 
 
 def selected_priority_label(selected_rate: float, avg_rank: float, baseline: float) -> str:
@@ -1114,12 +1611,30 @@ def find_traps(
     def weak(row: dict[str, Any]) -> bool:
         return row.get("adjusted_avg_rank", row.get("avg_rank", 0)) >= baseline + 0.45 or row.get("top4_rate", 100) <= 42
 
+    def comp_trait(row: dict[str, Any]) -> str | None:
+        key = row.get("main_bond", "")
+        if not key or key == "拼多多" or "-" not in key:
+            return None
+        return parse_trait_tier(key)[0]
+
+    strong_traits = {
+        trait
+        for row in comp_rows
+        if (trait := comp_trait(row))
+        and row["stats"]["appearances"] >= 20
+        and row["stats"]["top4_rate"] >= 60
+        and row["stats"]["avg_rank"] <= baseline
+    }
+
     comp_traps = [
         row
         for row in comp_rows
         if row["stats"]["appearances"] >= 5
         and (row["stats"]["avg_rank"] >= baseline + 0.45 or row["stats"]["top4_rate"] <= 42)
+        and comp_trait(row) not in strong_traits
     ]
+    for row in comp_traps:
+        row["trap_reason"] = "策略整体表现偏弱，且没有同羁绊强势大成形态覆盖"
     comp_traps.sort(key=lambda row: (-row["popularity"]["pick_rate"], -row["stats"]["avg_rank"]))
 
     return {
@@ -1163,9 +1678,11 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
         team_baseline = (
             sum(team_rank_value(feature) for feature in features) / len(features)
         )
-        comp_rows = cluster_compositions(features, args.min_comp_apps)
+        stage_rows = cluster_compositions(features, args.min_comp_apps)
+        comp_rows = merge_comp_strategies(stage_rows, features)
         hero_equipment = analyze_heroes_and_equipment(features, args.min_entity_apps, baseline)
         cards = analyze_cards(features, comp_rows, args.min_card_apps, baseline, team_baseline)
+        jiujiu_analysis = analyze_jiujiu(features, comp_rows, baseline)
         observed_names = {
             hero.name for feature in features for hero in feature.heroes
         } | {
@@ -1197,6 +1714,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 "equipment_normalization": "核选 prefix removed for equipment identity; selected rate retained",
                 "jiujiu_rule": "X啾啾 adds +1 to bond X when X exists in dict_bond",
                 "carry_score": "equipment_count*30 + selected_count*12 + stars*10 + tier*2 + max(0, 8-slot_index)*1.5",
+                "play_style_rule": "level<=6 is reroll; level>=8 without any low-cost 3-star is high-cost; level 7 follows low-cost main carry",
                 "card_order": "cards are ordered by slot_index; cards[0] is treated as the first/duo card",
                 "team_rank": "per match, teams are ranked 1..N by each team's best individual rank",
                 "card_granted_heroes": sorted(CARD_GRANTED_HEROES),
@@ -1215,8 +1733,11 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
             },
             "rankings": {
                 "compositions": comp_rows,
+                "composition_recommendations": build_composition_recommendations(comp_rows),
+                "composition_stages": stage_rows,
                 "cards": cards,
                 "heroes_and_equipment": hero_equipment,
+                "jiujiu": jiujiu_analysis,
                 "traps": traps,
                 "balance_targets": balance_targets,
             },
@@ -1227,6 +1748,75 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
 
 def render_pct(value: float) -> str:
     return f"{value:.1f}%"
+
+
+def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
+    stats = comp["stats"]
+    lines.append(
+        f"### {comp['label']}（{comp.get('play_style', '高费')}，{comp['confidence']}置信，n={stats['appearances']}）"
+    )
+    lines.append("")
+    lines.append(
+        f"- 表现：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，吃鸡 {render_pct(stats['win_rate'])}。"
+    )
+    carries = "、".join(
+        f"{item['hero_name']}({render_pct(item['share'])})" for item in comp["main_carries"]
+    )
+    lines.append(f"- 主C判断：{carries or '样本不足'}。")
+    breakdown = "、".join(
+        f"{row['play_style']}{render_pct(row['share'])}"
+        for row in comp.get("play_style_breakdown", [])
+    )
+    if breakdown:
+        lines.append(f"- 类型样本：{breakdown}。")
+    if comp.get("carry_requirements"):
+        req_text = "；".join(
+            f"{row['hero_name']}建议至少{row['recommended_min_stars']}星"
+            f"（前四中位{row['median_stars_top4']:.1f}星，三件套{render_pct(row['three_item_rate'])}）"
+            for row in comp["carry_requirements"][:2]
+        )
+        lines.append(f"- 主C成型门槛：{req_text}。")
+        expensive_note = [
+            row["hero_name"]
+            for row in comp["carry_requirements"][:2]
+            if row.get("high_cost_three_star_dependency")
+        ]
+        if expensive_note:
+            lines.append(
+                f"- 成型成本提醒：{ '、'.join(expensive_note) } 的三星高费样本会拉高上限，常规推荐按 2 星门槛评估。"
+            )
+    if comp.get("carry_equipment_notes"):
+        note_parts = []
+        for note in comp["carry_equipment_notes"][:2]:
+            important = [
+                item
+                for item in note["items"]
+                if item["label"] in ("疑似刚需", "高价值")
+            ][:3]
+            if important:
+                note_parts.append(
+                    f"{note['hero_name']}："
+                    + "、".join(
+                        f"{item['equipment_name']}({item['label']}, 不带惩罚{item['without_item_penalty']})"
+                        for item in important
+                    )
+                )
+        if note_parts:
+            lines.append(f"- 主C关键装备：{'；'.join(note_parts)}。")
+    bonds = "、".join(
+        f"{item['bond']}({render_pct(item['share'])})" for item in comp["common_bonds"][:5]
+    )
+    lines.append(f"- 常见羁绊：{bonds or '无稳定羁绊'}。")
+    lines.append("")
+    lines.append("| 等级 | 来源 | 置信度 | 棋子 |")
+    lines.append("| ---: | --- | --- | --- |")
+    for level in ("7", "8", "9"):
+        variant = comp["variants"][level]
+        lines.append(
+            f"| {level} | {variant['source']} | {variant['confidence']} | "
+            f"{'、'.join(variant['heroes'])} |"
+        )
+    lines.append("")
 
 
 def render_md(data: dict[str, Any]) -> str:
@@ -1271,6 +1861,16 @@ def render_md(data: dict[str, Any]) -> str:
             f"- 当前最优阵容族群：**{top_comp['label']}**，avg {top_comp['stats']['avg_rank']:.2f}，"
             f"top4 {render_pct(top_comp['stats']['top4_rate'])}，n={top_comp['stats']['appearances']}。"
         )
+        recommendations = data["rankings"].get("composition_recommendations", {})
+        for style in PLAY_STYLES:
+            rows = recommendations.get(style, [])
+            if not rows:
+                continue
+            top_style_comp = rows[0]
+            lines.append(
+                f"- {style}推荐首选：**{top_style_comp['label']}**，avg {top_style_comp['stats']['avg_rank']:.2f}，"
+                f"top4 {render_pct(top_style_comp['stats']['top4_rate'])}，n={top_style_comp['stats']['appearances']}。"
+            )
     if heroes:
         top_heroes = "、".join(
             f"{row['hero_name']}（carry {render_pct(row['carry_rate'])}, avg {row['avg_rank']:.2f}）"
@@ -1285,73 +1885,34 @@ def render_md(data: dict[str, Any]) -> str:
         lines.append(f"- 强势卡牌：{top_cards}。")
     lines.append("")
 
-    lines.append("## 主流强势阵容推荐")
+    lines.append("## 赌狗阵容推荐")
     lines.append("")
-    if not comps:
-        lines.append("当前样本下没有达到阈值的稳定阵容族群。")
+    recommendations = data["rankings"].get("composition_recommendations", {})
+    reroll_comps = recommendations.get("赌狗", [])
+    if not reroll_comps:
+        lines.append("当前样本下没有达到阈值的稳定赌狗阵容。")
         lines.append("")
-    for comp in comps[:8]:
-        stats = comp["stats"]
-        lines.append(
-            f"### {comp['label']}（{comp['confidence']}置信，n={stats['appearances']}）"
-        )
+    for comp in reroll_comps[:8]:
+        append_comp_markdown(lines, comp)
+
+    lines.append("## 高费阵容推荐")
+    lines.append("")
+    high_cost_comps = recommendations.get("高费", [])
+    if not high_cost_comps:
+        lines.append("当前样本下没有达到阈值的稳定高费阵容。")
         lines.append("")
-        lines.append(
-            f"- 表现：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，吃鸡 {render_pct(stats['win_rate'])}。"
-        )
-        carries = "、".join(
-            f"{item['hero_name']}({render_pct(item['share'])})" for item in comp["main_carries"]
-        )
-        lines.append(f"- 主C判断：{carries or '样本不足'}。")
-        if comp.get("carry_requirements"):
-            req_text = "；".join(
-                f"{row['hero_name']}建议至少{row['recommended_min_stars']}星"
-                f"（前四中位{row['median_stars_top4']:.1f}星，三件套{render_pct(row['three_item_rate'])}）"
-                for row in comp["carry_requirements"][:2]
-            )
-            lines.append(f"- 主C成型门槛：{req_text}。")
-        if comp.get("carry_equipment_notes"):
-            note_parts = []
-            for note in comp["carry_equipment_notes"][:2]:
-                important = [
-                    item
-                    for item in note["items"]
-                    if item["label"] in ("疑似刚需", "高价值")
-                ][:3]
-                if important:
-                    note_parts.append(
-                        f"{note['hero_name']}："
-                        + "、".join(
-                            f"{item['equipment_name']}({item['label']}, 不带惩罚{item['without_item_penalty']})"
-                            for item in important
-                        )
-                    )
-            if note_parts:
-                lines.append(f"- 主C关键装备：{'；'.join(note_parts)}。")
-        bonds = "、".join(
-            f"{item['bond']}({render_pct(item['share'])})" for item in comp["common_bonds"][:5]
-        )
-        lines.append(f"- 常见羁绊：{bonds or '无稳定羁绊'}。")
-        lines.append("")
-        lines.append("| 等级 | 来源 | 置信度 | 棋子 |")
-        lines.append("| ---: | --- | --- | --- |")
-        for level in ("7", "8", "9"):
-            variant = comp["variants"][level]
-            lines.append(
-                f"| {level} | {variant['source']} | {variant['confidence']} | "
-                f"{'、'.join(variant['heroes'])} |"
-            )
-        lines.append("")
+    for comp in high_cost_comps[:8]:
+        append_comp_markdown(lines, comp)
 
     lines.append("## 阵容成型难度与热门程度")
     lines.append("")
-    lines.append("| 阵容 | 难度 | 热门 | 后四未成型率 | 同行数 | 出场率 |")
-    lines.append("| --- | --- | --- | ---: | ---: | ---: |")
+    lines.append("| 阵容 | 类型 | 难度 | 热门 | 后四未成型率 | 同行数 | 出场率 |")
+    lines.append("| --- | --- | --- | --- | ---: | ---: | ---: |")
     for comp in comps[:12]:
         difficulty = comp["difficulty"]
         popularity = comp["popularity"]
         lines.append(
-            f"| {comp['label']} | {difficulty['label']} | {popularity['label']} | "
+            f"| {comp['label']} | {comp.get('play_style', '高费')} | {difficulty['label']} | {popularity['label']} | "
             f"{render_pct(difficulty['unfinished_bottom_rate'])} | "
             f"{difficulty['avg_same_match_contest']:.2f} | {render_pct(popularity['pick_rate'])} |"
         )
@@ -1446,6 +2007,12 @@ def render_md(data: dict[str, Any]) -> str:
                     f"| {item['equipment_name']} | {item['adjusted_avg_rank']:.2f} | "
                     f"{render_pct(item['selected_rate'])} | {item['selected_priority']} | {item['appearances']} |"
                 )
+        if row.get("low_sample_observations"):
+            obs = " / ".join(
+                f"{item['equipment_name']}(修正{item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
+                for item in row["low_sample_observations"][:3]
+            )
+            lines.append(f"- 低样本观察：{obs}")
         if row["recommended_sets"]:
             sets = "；".join(
                 f"{item['equipment_set']}({item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
@@ -1473,6 +2040,30 @@ def render_md(data: dict[str, Any]) -> str:
             lines.append(
                 f"- {row['key']}：修正 {row['adjusted_avg_rank']:.2f}，top4 {render_pct(row['top4_rate'])}，n={row['appearances']}"
             )
+    jiujiu_analysis = data["rankings"].get("jiujiu", {})
+    rankings = jiujiu_analysis.get("jiujiu_rankings", [])
+    if rankings:
+        lines.append("")
+        lines.append("### 啾啾强度排名")
+        lines.append("")
+        lines.append("| 啾啾 | 有效样本 | 有效率 | 有效修正 | 前四率 | 推荐阵容/棋子 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for row in rankings[:16]:
+            comps = "；".join(
+                f"{comp['family_label']}({comp['appearances']})"
+                for comp in row["recommended_comps"][:2]
+            )
+            heroes = "；".join(
+                f"{hero['hero_name']}({hero['appearances']})"
+                for hero in row.get("recommended_heroes", [])[:2]
+            )
+            effective_stats = row.get("effective_stats") or row
+            targets = comps or heroes or "有效样本不足"
+            lines.append(
+                f"| {row['equipment_name']} | {row['effective_appearances']} | {render_pct(row['effective_rate'])} | "
+                f"{effective_stats['adjusted_avg_rank']:.2f} | {render_pct(effective_stats['top4_rate'])} | {targets} |"
+            )
+        lines.append("")
     lines.append("")
 
     lines.append("## 版本陷阱分析")
@@ -1517,102 +2108,228 @@ def render_md(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_xhs_md(data: dict[str, Any]) -> str:
-    comps = data["rankings"]["compositions"]
-    cards = data["rankings"]["cards"]
-    recommendations = data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
-    traps = data["rankings"]["traps"]
+def esc(value: Any) -> str:
+    return html.escape(str(value), quote=True)
 
-    lines: list[str] = []
-    lines.append("# 这版本上分先看这3套")
-    lines.append("")
-    lines.append("直接给结论，别硬玩版本答案，看发牌和同行再决定方向。低样本我会标观察。")
-    lines.append("")
 
-    lines.append("## 版本阵容推荐")
-    for idx, comp in enumerate(comps[:3], start=1):
-        carries = "、".join(item["hero_name"] for item in comp["main_carries"][:2])
-        req = comp.get("carry_requirements", [])
-        req_text = ""
-        if req:
-            req_text = f"，主C建议{req[0]['recommended_min_stars']}星起"
-        equipment_text = ""
-        notes = comp.get("carry_equipment_notes", [])
-        if notes:
-            items = [
-                item["equipment_name"]
-                for item in notes[0].get("items", [])
-                if item["label"] in ("疑似刚需", "高价值")
-            ][:2]
-            if items:
-                equipment_text = f"，装备优先{ '、'.join(items) }"
-        variant = comp["variants"].get("8") or comp["variants"].get("9") or comp["variants"].get("7")
-        heroes = "、".join(variant["heroes"][:9]) if variant else "样本不足"
-        lines.append(
-            f"{idx}. {comp['label']}：avg {comp['stats']['avg_rank']:.2f}，top4 {render_pct(comp['stats']['top4_rate'])}。"
-            f"主C {carries}{req_text}{equipment_text}。8/9人口参考：{heroes}。"
-        )
-    lines.append("")
+def unique_route_bonds(comp: dict[str, Any]) -> str:
+    route: list[str] = []
+    mature_bond = comp.get("mature_stage", {}).get("bond") or comp.get("main_bond")
+    for stage in comp.get("transition_stages", []):
+        bond = stage.get("bond")
+        if not bond or bond == mature_bond or bond in route:
+            continue
+        route.append(bond)
+    if mature_bond and mature_bond not in route:
+        route.append(mature_bond)
+    return " → ".join(route[:4]) or str(comp.get("main_bond", "样本不足"))
 
-    lines.append("## 阵容卡牌推荐")
-    comp_cards = cards.get("composition_cards", [])
-    if comp_cards:
-        for row in comp_cards[:3]:
-            picks = "、".join(card["key"] for card in row["cards"][:4])
-            lines.append(f"- {row['family_label']}：{picks}")
-    else:
-        lines.append("- 当前阵容内卡牌样本不足，先按全局强卡拿。")
-    lines.append("")
 
-    lines.append("## 强势棋子装备")
-    sorted_recs = sorted(
-        recommendations[:20],
-        key=lambda row: (
-            -(row["hero_stats"].get("tier") or 0),
-            row["hero_stats"]["adjusted_avg_rank"],
-        ),
+def html_comp_card(comp: dict[str, Any]) -> str:
+    mature = comp.get("mature_stage", {})
+    variants = mature.get("variants", comp.get("variants", {}))
+    variant = variants.get("8") or variants.get("9") or variants.get("7") or {}
+    heroes = " / ".join(variant.get("heroes", [])[:9]) or "样本不足"
+    req_text = "；".join(
+        f"{row['hero_name']} {row['recommended_min_stars']}星起"
+        for row in comp.get("carry_requirements", [])[:2]
     )
-    for row in sorted_recs[:10]:
-        tier = row["hero_stats"].get("tier") or "?"
-        items = "、".join(item["equipment_name"] for item in row["recommended_items"][:3])
-        lines.append(f"- {tier}费 {row['hero_name']}：{items}")
-    lines.append("")
+    breakdown = " · ".join(
+        f"{row['play_style']}{render_pct(row['share'])}"
+        for row in comp.get("play_style_breakdown", [])[:2]
+    )
+    return f"""
+    <article class="comp-card">
+      <div class="comp-head">
+        <span class="badge">{esc(comp.get('play_style', '高费'))}</span>
+        <h2>{esc(comp['label'])}</h2>
+      </div>
+      <div class="metrics">
+        <b>Avg {comp['stats']['avg_rank']:.2f}</b>
+        <b>Top4 {render_pct(comp['stats']['top4_rate'])}</b>
+        <b>n={comp['stats']['appearances']}</b>
+      </div>
+      <p><strong>成型：</strong>{esc(req_text or '样本不足')}</p>
+      <p><strong>路线：</strong>{esc(unique_route_bonds(comp))}</p>
+      <p><strong>类型样本：</strong>{esc(breakdown or comp.get('play_style', '高费'))}</p>
+      <p class="lineup">{esc(heroes)}</p>
+    </article>
+    """
 
-    lines.append("## 单卡和双人第一卡")
-    top_cards = "、".join(row["key"] for row in cards["single_cards"][:6])
-    lines.append(f"- 单卡优先：{top_cards}")
-    first_duos = cards.get("duo_card_contribution", [])
-    if first_duos:
-        duo_text = "、".join(
-            f"{row['key']}({row['team_avg_rank']:.2f})"
-            for row in first_duos[:4]
-        )
-        lines.append(f"- 双人第一卡观察：{duo_text}")
-    lines.append("")
 
-    lines.append("## 版本陷阱")
-    trap_lines = []
-    for key in ("compositions", "heroes", "cards"):
-        for row in traps.get(key, [])[:2]:
-            name = row.get("label") or row.get("hero_name") or row.get("key")
-            stats = row.get("stats", row)
-            trap_lines.append(f"{name}(avg {stats['avg_rank']:.2f})")
-    if trap_lines:
-        lines.append("、".join(trap_lines[:5]))
+def html_list_items(rows: list[dict[str, Any]], value_key: str = "key") -> str:
+    if not rows:
+        return "<li>样本不足</li>"
+    items = []
+    for row in rows:
+        label = row.get(value_key) or row.get("label") or row.get("hero_name") or row.get("equipment_name")
+        items.append(f"<li>{esc(label)}</li>")
+    return "\n".join(items)
+
+
+def html_trap_group(title: str, rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        items = "<li>暂无稳定陷阱</li>"
     else:
-        lines.append("当前没有特别稳定的高热低效陷阱，低样本别上头就行。")
-    lines.append("")
-    lines.append("#蛋仔派对 #阵容推荐 #上分阵容 #卡牌推荐 #装备推荐")
-    return "\n".join(lines) + "\n"
+        items = "\n".join(
+            f"<li><b>{esc(row.get('label') or row.get('hero_name') or row.get('key'))}</b>"
+            f"<span>avg {row.get('stats', row)['avg_rank']:.2f}</span></li>"
+            for row in rows[:2]
+        )
+    return f"<div><h4>{esc(title)}</h4><ul>{items}</ul></div>"
 
 
-def write_outputs(data: dict[str, Any], json_path: Path, md_path: Path, xhs_md_path: Path) -> None:
+def render_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    recommendations = data["rankings"].get("composition_recommendations", {})
+    cards = data["rankings"]["cards"]
+    jiujiu_rows = data["rankings"].get("jiujiu", {}).get("jiujiu_rankings", [])[:5]
+    traps = data["rankings"]["traps"]
+    generated = esc(data["generated_at"].split("T")[0])
+
+    comp_sections = []
+    for style in PLAY_STYLES:
+        rows = recommendations.get(style, [])[:2]
+        if not rows:
+            cards_html = '<p class="empty">当前样本不足。</p>'
+        else:
+            cards_html = "".join(html_comp_card(comp) for comp in rows)
+        comp_sections.append(
+            f"""
+            <section class="style-section">
+              <div class="section-title">{esc(style)}阵容推荐</div>
+              <div class="comp-grid">{cards_html}</div>
+            </section>
+            """
+        )
+
+    top_cards = html_list_items(cards["single_cards"][:6])
+    duo_cards = html_list_items(cards.get("duo_card_contribution", [])[:4])
+    jiujiu_html = "\n".join(
+        f"<li><b>{esc(row['equipment_name'])}</b><span>有效 {row['effective_appearances']} / {render_pct(row['effective_rate'])}</span></li>"
+        for row in jiujiu_rows
+    ) or "<li>样本不足</li>"
+    trap_html = "".join(
+        html_trap_group(label, traps.get(key, []))
+        for label, key in (("阵容", "compositions"), ("棋子", "heroes"), ("卡牌", "cards"))
+    )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DZPPQ 当前环境一图流</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #10131f;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: #f8fafc;
+    }}
+    .poster {{
+      width: 1080px;
+      min-height: 1440px;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 42px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(91,141,239,.45), transparent 28%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.32), transparent 24%),
+        linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
+    }}
+    header {{ margin-bottom: 22px; }}
+    .eyebrow {{ color: #fbbf24; font-weight: 800; letter-spacing: 4px; }}
+    h1 {{ font-size: 52px; margin: 10px 0; line-height: 1.08; }}
+    .sub {{ color: #cbd5e1; font-size: 21px; }}
+    .stats {{
+      display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin: 20px 0;
+    }}
+    .stat {{
+      background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14);
+      border-radius: 22px; padding: 16px;
+    }}
+    .stat b {{ display:block; font-size: 28px; color:#fff; }}
+    .stat span {{ color:#a8b3c7; }}
+    .style-section {{ margin-top: 18px; }}
+    .section-title {{
+      color:#fde68a; font-weight:900; font-size:27px; margin:0 0 10px;
+    }}
+    .comp-grid {{ display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    .comp-card, .panel {{
+      background: rgba(255,255,255,.09);
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 28px;
+      padding: 19px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.24);
+    }}
+    .comp-head {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+    .badge {{ background:#fbbf24; color:#111827; border-radius:999px; padding:6px 12px; font-weight:900; flex:0 0 auto; }}
+    h2 {{ margin:0; font-size:24px; line-height:1.22; min-width:0; overflow-wrap:anywhere; }}
+    .metrics {{ display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; color:#bfdbfe; }}
+    p {{ margin:7px 0; color:#dbeafe; font-size:16px; line-height:1.38; overflow-wrap:anywhere; }}
+    .lineup {{ color:#fef3c7; }}
+    .empty {{ color:#94a3b8; }}
+    .bottom {{ display:grid; grid-template-columns: repeat(2, 1fr); gap:16px; margin-top:18px; }}
+    .panel h3 {{ margin:0 0 10px; font-size:24px; color:#fde68a; }}
+    .panel h4 {{ margin:8px 0 4px; color:#bfdbfe; font-size:17px; }}
+    ul {{ list-style:none; padding:0; margin:0; }}
+    .panel li {{ margin:8px 0; display:flex; justify-content:space-between; gap:16px; color:#dbeafe; line-height:1.35; }}
+    .panel li b {{ overflow-wrap:anywhere; }}
+    .cards {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; font-size:18px; line-height:1.45; color:#e0f2fe; }}
+    footer {{ margin-top:22px; color:#94a3b8; font-size:16px; text-align:center; }}
+  </style>
+</head>
+<body>
+<main class="poster">
+  <header>
+    <div class="eyebrow">DZPPQ META REPORT</div>
+    <h1>当前版本上分阵容一图流</h1>
+    <div class="sub">基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}</div>
+  </header>
+  <section class="stats">
+    <div class="stat"><b>{quality['matches']}</b><span>对局样本</span></div>
+    <div class="stat"><b>{quality['bot_player_records_excluded']}</b><span>人机记录过滤</span></div>
+    <div class="stat"><b>{quality['unknown_heroes']}</b><span>unknown 棋子</span></div>
+    <div class="stat"><b>{quality['cards']}</b><span>卡牌记录</span></div>
+  </section>
+  {''.join(comp_sections)}
+  <section class="bottom">
+    <div class="panel">
+      <h3>卡牌优先级</h3>
+      <div class="cards">
+        <div><h4>单卡</h4><ul>{top_cards}</ul></div>
+        <div><h4>第一卡贡献</h4><ul>{duo_cards}</ul></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>啾啾观察</h3>
+      <ul>{jiujiu_html}</ul>
+    </div>
+    <div class="panel">
+      <h3>版本陷阱</h3>
+      <div class="cards">{trap_html}</div>
+    </div>
+    <div class="panel">
+      <h3>读法提醒</h3>
+      <p>赌狗看低费主C与三星信号，高费看8级以上无低费三星的大成样本；低样本高胜只作观察。</p>
+    </div>
+  </section>
+  <footer>完整数据见 latest_meta_analysis_report.md / latest_meta_analysis.json</footer>
+</main>
+</body>
+</html>
+"""
+
+
+def write_outputs(data: dict[str, Any], json_path: Path, md_path: Path, html_path: Path) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    xhs_md_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     md_path.write_text(render_md(data), encoding="utf-8")
-    xhs_md_path.write_text(render_xhs_md(data), encoding="utf-8")
+    html_path.write_text(render_html(data), encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1620,7 +2337,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, default=None, help="SQLite match DB path")
     parser.add_argument("--json", type=Path, default=DEFAULT_JSON, help="JSON output path")
     parser.add_argument("--md", type=Path, default=DEFAULT_MD, help="Markdown output path")
-    parser.add_argument("--xhs-md", type=Path, default=DEFAULT_XHS_MD, help="Xiaohongshu-style Markdown output path")
+    parser.add_argument("--html", type=Path, default=DEFAULT_HTML, help="HTML poster output path")
     parser.add_argument("--balance-notes", type=Path, default=None, help="Optional balance notes file")
     parser.add_argument("--min-comp-apps", type=int, default=5)
     parser.add_argument("--min-entity-apps", type=int, default=10)
@@ -1633,11 +2350,11 @@ def main() -> None:
     data = build_analysis(args)
     json_path = args.json if args.json.is_absolute() else ROOT / args.json
     md_path = args.md if args.md.is_absolute() else ROOT / args.md
-    xhs_md_path = args.xhs_md if args.xhs_md.is_absolute() else ROOT / args.xhs_md
-    write_outputs(data, json_path, md_path, xhs_md_path)
+    html_path = args.html if args.html.is_absolute() else ROOT / args.html
+    write_outputs(data, json_path, md_path, html_path)
     print(f"Wrote {rel(json_path)}")
     print(f"Wrote {rel(md_path)}")
-    print(f"Wrote {rel(xhs_md_path)}")
+    print(f"Wrote {rel(html_path)}")
 
 
 if __name__ == "__main__":
