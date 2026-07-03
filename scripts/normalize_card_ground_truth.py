@@ -1,0 +1,114 @@
+# -*- coding: utf-8 -*-
+"""Normalize legacy card names in match ground truth JSON."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.card_rules import normalize_card_label, resolve_card_label  # noqa: E402
+from src.match_ground_truth import (  # noqa: E402
+    DEFAULT_GT_PATH,
+    load_match_ground_truth,
+    save_match_ground_truth,
+)
+
+LEGACY_CARD_LABELS = frozenset(
+    {
+        "装备共鸣法",
+        "装备共鸣血",
+        "装备共鸣攻",
+        "装备共鸣法pro",
+        "装备共鸣血pro",
+        "装备共鸣攻pro",
+        "大力",
+        "巫术",
+        "守护",
+        "重质拍档支援",
+        "最佳拍档",
+        "最强支援",
+        "福袋·蓝",
+        "有钱同享",
+    }
+)
+
+
+def normalize_ground_truth(data: dict) -> Counter:
+    changes: Counter = Counter()
+    for entry in data.get("screenshots", {}).values():
+        for player in entry.get("players", []):
+            heroes = player.get("heroes", [])
+            for card in player.get("cards", []):
+                old_name = card.get("card_name", "")
+                new_name = resolve_card_label(
+                    old_name,
+                    int(card["slot_index"]),
+                    heroes,
+                )
+                if new_name != old_name:
+                    changes[f"{old_name} -> {new_name}"] += 1
+                    card["card_name"] = new_name
+    return changes
+
+
+def command_normalize(args: argparse.Namespace) -> None:
+    data = load_match_ground_truth(args.gt)
+    changes = normalize_ground_truth(data)
+    if args.dry_run:
+        print("Dry run only; no file written.")
+    else:
+        save_match_ground_truth(data, args.gt)
+        print(f"Updated {args.gt}")
+    if not changes:
+        print("No card name changes needed.")
+        return
+    print("Card name replacements:")
+    for key, count in sorted(changes.items()):
+        print(f"  {key}: {count}")
+
+
+def command_check(args: argparse.Namespace) -> None:
+    data = load_match_ground_truth(args.gt)
+    found: Counter = Counter()
+    for screenshot_name, entry in data.get("screenshots", {}).items():
+        for player in entry.get("players", []):
+            for card in player.get("cards", []):
+                name = card.get("card_name", "")
+                if name in LEGACY_CARD_LABELS or name != normalize_card_label(name):
+                    found[f"{screenshot_name} P{player['rank']} slot{card['slot_index']}: {name}"] += 1
+    if not found:
+        print("No legacy card labels found.")
+        return
+    print("Legacy or non-canonical card labels:")
+    for key, count in sorted(found.items()):
+        print(f"  {key}")
+    raise SystemExit(1)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--gt", type=Path, default=DEFAULT_GT_PATH)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    normalize = subparsers.add_parser("normalize", help="Rewrite card names in GT")
+    normalize.add_argument("--dry-run", action="store_true")
+    normalize.set_defaults(func=command_normalize)
+
+    check = subparsers.add_parser("check", help="Fail if legacy card labels remain")
+    check.set_defaults(func=command_check)
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
