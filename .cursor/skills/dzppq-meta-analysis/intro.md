@@ -67,7 +67,7 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 - Play-style rules: `classify_play_style()` and `play_style_summary()`.
 - Recommendation split: `build_composition_recommendations()` and the Markdown/HTML renderers.
 - Carry requirements: `summarize_carry_requirements()` and `summarize_comp_carry_equipment()`.
-- Card logic: `analyze_cards()`.
+- Card logic: `analyze_cards()` with prefix-type grouping via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`.
 - Jiujiu logic: `analyze_jiujiu()`.
 - Trap logic: `find_traps()`.
 - Poster layout: `render_html()` and its small HTML helper functions.

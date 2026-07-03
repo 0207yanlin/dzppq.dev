@@ -691,6 +691,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate = subparsers.add_parser("generate", help="Scan GT and write candidate crops")
     generate.add_argument(
+        "--path-prefix",
+        default="screenshots.0701/",
+        help="Only scan GT screenshots whose path starts with this prefix",
+    )
+    generate.add_argument(
+        "--hero-threshold",
+        type=float,
+        default=HERO_SCORE_THRESHOLD,
+        help="Include hero slots with match score below this value",
+    )
+    generate.add_argument(
+        "--card-threshold",
+        type=float,
+        default=CARD_SCORE_THRESHOLD,
+        help="Include card slots with match score below this value",
+    )
+    generate.add_argument(
         "--reset-rejected",
         action="store_true",
         help="Turn rejected/skipped candidates back into pending",

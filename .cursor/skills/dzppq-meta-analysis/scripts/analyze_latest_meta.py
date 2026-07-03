@@ -20,12 +20,19 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.card_rules import split_card_prefix  # noqa: E402
+
 DEFAULT_JSON = ROOT / "data" / "latest_meta_analysis.json"
 DEFAULT_MD = ROOT / "data" / "latest_meta_analysis_report.md"
 DEFAULT_HTML = ROOT / "data" / "latest_meta_analysis_report.html"
 
 CARD_GRANTED_HEROES = {"暴龙虾饺"}
 PLAY_STYLES = ("赌狗", "高费")
+CARD_PREFIX_TYPES = ("彩", "黄", "蓝", "白", "其他")
+UNPREFIXED_CARD_TYPE_MAP = {
+    "吸吸宝pro": "黄",
+    "快速成型": "黄",
+}
 
 HERO_ALIASES = {
     "双面教师林野·前排": "双面教师林野",
@@ -140,6 +147,53 @@ def normalize_equipment_name(name: str) -> tuple[str, bool]:
     if name.startswith("核选"):
         return name[len("核选") :], True
     return name, False
+
+
+def card_prefix_type(card_name: str) -> str:
+    prefix, _ = split_card_prefix(card_name)
+    if prefix:
+        return prefix
+    return UNPREFIXED_CARD_TYPE_MAP.get(card_name, "其他")
+
+
+def aggregate_key_stats(items: list[tuple[str, int]], min_apps: int, baseline: float) -> list[dict[str, Any]]:
+    stats: dict[str, RankStats] = defaultdict(RankStats)
+    for key, rank in items:
+        if key:
+            stats[key].add(rank)
+    rows = []
+    for key, stat in stats.items():
+        if stat.appearances >= min_apps:
+            rows.append({"key": key, **stat.to_dict(baseline_rank=baseline, prior=8)})
+    rows.sort(key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"]))
+    return rows
+
+
+def aggregate_key_stats_by_prefix(
+    items: list[tuple[str, int]],
+    min_apps: int,
+    baseline: float,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    rows = aggregate_key_stats(items, min_apps, baseline)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[card_prefix_type(row["key"])].append(row)
+
+    annotated: list[dict[str, Any]] = []
+    by_prefix: dict[str, list[dict[str, Any]]] = {}
+    for prefix_type in CARD_PREFIX_TYPES:
+        group_rows = grouped.get(prefix_type, [])
+        group_rows.sort(
+            key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"])
+        )
+        ranked_rows: list[dict[str, Any]] = []
+        for rank, row in enumerate(group_rows, start=1):
+            ranked_row = {**row, "prefix_type": prefix_type, "prefix_rank": rank}
+            ranked_rows.append(ranked_row)
+            annotated.append(ranked_row)
+        if ranked_rows:
+            by_prefix[prefix_type] = ranked_rows
+    return annotated, by_prefix
 
 
 def jiujiu_trait(equipment_name: str) -> str | None:
@@ -1176,19 +1230,6 @@ def summarize_comp_carry_equipment(
     return notes
 
 
-def aggregate_key_stats(items: list[tuple[str, int]], min_apps: int, baseline: float) -> list[dict[str, Any]]:
-    stats: dict[str, RankStats] = defaultdict(RankStats)
-    for key, rank in items:
-        if key:
-            stats[key].add(rank)
-    rows = []
-    for key, stat in stats.items():
-        if stat.appearances >= min_apps:
-            rows.append({"key": key, **stat.to_dict(baseline_rank=baseline, prior=8)})
-    rows.sort(key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"]))
-    return rows
-
-
 def analyze_cards(
     features: list[PlayerFeature],
     comp_rows: list[dict[str, Any]],
@@ -1306,9 +1347,18 @@ def analyze_cards(
         )
     )
 
+    single_cards, single_cards_by_prefix = aggregate_key_stats_by_prefix(
+        single_items, min_apps, baseline
+    )
+    first_card_rankings, first_card_rankings_by_prefix = aggregate_key_stats_by_prefix(
+        first_card_items, max(6, min_apps // 2), baseline
+    )
+
     return {
-        "single_cards": aggregate_key_stats(single_items, min_apps, baseline),
-        "first_card_rankings": aggregate_key_stats(first_card_items, max(6, min_apps // 2), baseline),
+        "single_cards": single_cards,
+        "single_cards_by_prefix": single_cards_by_prefix,
+        "first_card_rankings": first_card_rankings,
+        "first_card_rankings_by_prefix": first_card_rankings_by_prefix,
         "card_pairs_observation": aggregate_key_stats(pair_items, max(6, min_apps // 2), baseline)[:20],
         "card_triples_observation": aggregate_key_stats(triple_items, max(5, min_apps // 2), baseline)[:20],
         "teammate_card_pairs_observation": aggregate_key_stats(
@@ -1420,16 +1470,24 @@ def analyze_heroes_and_equipment(
         items.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
         low_sample_items.sort(key=lambda row: (row["adjusted_avg_rank"], -row["top4_rate"], -row["appearances"]))
         sets.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
-        if items or low_sample_items:
-            recommendations.append(
-                {
-                    "hero_name": hero_name,
-                    "hero_stats": hero,
-                    "recommended_items": items[:6],
-                    "low_sample_observations": low_sample_items[:4],
-                    "recommended_sets": sets[:4],
-                }
-            )
+        recommendations.append(
+            {
+                "hero_name": hero_name,
+                "hero_stats": hero,
+                "recommended_items": items[:6],
+                "low_sample_observations": low_sample_items[:4],
+                "recommended_sets": sets[:4],
+                "has_equipment_data": bool(items or low_sample_items),
+            }
+        )
+
+    recommendations.sort(
+        key=lambda row: (
+            row["hero_stats"].get("tier") or 99,
+            -row["hero_stats"].get("carry_appearances", 0),
+            row["hero_name"],
+        )
+    )
 
     equipment_rows = []
     for item_name, stat in item_stats.items():
@@ -1439,7 +1497,7 @@ def analyze_heroes_and_equipment(
 
     return {
         "heroes": heroes,
-        "carry_equipment_recommendations": recommendations[:30],
+        "carry_equipment_recommendations": recommendations,
         "equipment": equipment_rows,
         "bonds": aggregate_key_stats(trait_items, min_apps, baseline),
         "jiujiu_bonds": aggregate_key_stats(jiujiu_items, max(5, min_apps // 3), baseline),
@@ -1600,10 +1658,34 @@ def selected_priority_label(selected_rate: float, avg_rank: float, baseline: flo
     return "低"
 
 
+def find_card_traps(
+    cards_by_prefix: dict[str, list[dict[str, Any]]],
+    baseline: float,
+) -> list[dict[str, Any]]:
+    def weak(row: dict[str, Any]) -> bool:
+        return row.get("adjusted_avg_rank", row.get("avg_rank", 0)) >= baseline + 0.45 or row.get(
+            "top4_rate", 100
+        ) <= 42
+
+    traps: list[dict[str, Any]] = []
+    for prefix_type in CARD_PREFIX_TYPES:
+        for row in cards_by_prefix.get(prefix_type, []):
+            if row["appearances"] >= 12 and weak(row):
+                traps.append(
+                    {
+                        **row,
+                        "trap_reason": f"{prefix_type}类内样本充足但表现偏弱",
+                    }
+                )
+    traps.sort(key=lambda row: (-row["appearances"], -row["adjusted_avg_rank"]))
+    return traps[:10]
+
+
 def find_traps(
     comp_rows: list[dict[str, Any]],
     hero_rows: list[dict[str, Any]],
     card_rows: list[dict[str, Any]],
+    cards_by_prefix: dict[str, list[dict[str, Any]]],
     bond_rows: list[dict[str, Any]],
     equipment_rows: list[dict[str, Any]],
     baseline: float,
@@ -1640,7 +1722,7 @@ def find_traps(
     return {
         "compositions": comp_traps[:10],
         "heroes": [row for row in hero_rows if row["appearances"] >= 10 and weak(row)][:10],
-        "cards": [row for row in card_rows if row["appearances"] >= 12 and weak(row)][:10],
+        "cards": find_card_traps(cards_by_prefix, baseline),
         "bonds": [row for row in bond_rows if row["appearances"] >= 10 and weak(row)][:10],
         "equipment": [row for row in equipment_rows if row["appearances"] >= 10 and weak(row)][:10],
     }
@@ -1700,6 +1782,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
             comp_rows,
             hero_equipment["heroes"],
             cards["single_cards"],
+            cards["single_cards_by_prefix"],
             hero_equipment["bonds"],
             hero_equipment["equipment"],
             baseline,
@@ -1716,6 +1799,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 "carry_score": "equipment_count*30 + selected_count*12 + stars*10 + tier*2 + max(0, 8-slot_index)*1.5",
                 "play_style_rule": "level<=6 is reroll; level>=8 without any low-cost 3-star is high-cost; level 7 follows low-cost main carry",
                 "card_order": "cards are ordered by slot_index; cards[0] is treated as the first/duo card",
+                "card_prefix_ranking": "single/first-card rankings are grouped by card template prefix (彩/黄/蓝/白/其他) and ranked within each group",
                 "team_rank": "per match, teams are ranked 1..N by each team's best individual rank",
                 "card_granted_heroes": sorted(CARD_GRANTED_HEROES),
                 "min_samples": {
@@ -1744,6 +1828,49 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def append_hero_equipment_block(lines: list[str], row: dict[str, Any]) -> None:
+    hero = row["hero_stats"]
+    tier = hero.get("tier")
+    tier_label = f"{tier}费，" if tier is not None else ""
+    lines.append(
+        f"### {row['hero_name']}（{tier_label}主C率 {render_pct(hero['carry_rate'])}，"
+        f"avg {hero['avg_rank']:.2f}，n={hero['appearances']}）"
+    )
+    if row.get("recommended_items"):
+        lines.append("")
+        lines.append("| 装备 | 修正名次 | 核选占比 | 核选优先级 | 样本 |")
+        lines.append("| --- | ---: | ---: | --- | ---: |")
+        for item in row["recommended_items"][:6]:
+            lines.append(
+                f"| {item['equipment_name']} | {item['adjusted_avg_rank']:.2f} | "
+                f"{render_pct(item['selected_rate'])} | {item['selected_priority']} | {item['appearances']} |"
+            )
+    elif row.get("low_sample_observations"):
+        lines.append("")
+        lines.append("| 装备 | 修正名次 | 核选占比 | 核选优先级 | 样本 |")
+        lines.append("| --- | ---: | ---: | --- | ---: |")
+        for item in row["low_sample_observations"][:6]:
+            lines.append(
+                f"| {item['equipment_name']} | {item['adjusted_avg_rank']:.2f} | "
+                f"{render_pct(item['selected_rate'])} | {item['selected_priority']} | {item['appearances']} |"
+            )
+    else:
+        lines.append("- 出装样本不足：该棋子在过滤后样本中缺少足够单件出装记录，多为副C/前排或出装不完整。")
+    if row.get("recommended_items") and row.get("low_sample_observations"):
+        obs = " / ".join(
+            f"{item['equipment_name']}(修正{item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
+            for item in row["low_sample_observations"][:3]
+        )
+        lines.append(f"- 低样本观察：{obs}")
+    if row["recommended_sets"]:
+        sets = "；".join(
+            f"{item['equipment_set']}({item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
+            for item in row["recommended_sets"][:3]
+        )
+        lines.append(f"- 常见三件套：{sets}")
+    lines.append("")
 
 
 def render_pct(value: float) -> str:
@@ -1878,11 +2005,19 @@ def render_md(data: dict[str, Any]) -> str:
         )
         lines.append(f"- 高投入核心棋子：{top_heroes}。")
     if cards:
-        top_cards = "、".join(
-            f"{row['key']}（修正 {row['adjusted_avg_rank']:.2f}）"
-            for row in cards[:5]
-        )
-        lines.append(f"- 强势卡牌：{top_cards}。")
+        cards_by_prefix = data["rankings"]["cards"].get("single_cards_by_prefix", {})
+        if cards_by_prefix:
+            top_cards = "、".join(
+                f"{prefix_type}类 {rows[0]['key']}（修正 {rows[0]['adjusted_avg_rank']:.2f}）"
+                for prefix_type in CARD_PREFIX_TYPES
+                if (rows := cards_by_prefix.get(prefix_type))
+            )
+        else:
+            top_cards = "、".join(
+                f"{row['key']}（修正 {row['adjusted_avg_rank']:.2f}）"
+                for row in cards[:5]
+            )
+        lines.append(f"- 强势卡牌（分类型）：{top_cards}。")
     lines.append("")
 
     lines.append("## 赌狗阵容推荐")
@@ -1923,17 +2058,54 @@ def render_md(data: dict[str, Any]) -> str:
     lines.append(
         "卡牌顺序按 `slot_index` 统计，第一张卡牌视为双人配合重点；队伍排名按每局队伍最高个人名次重新排序为 1-4。"
     )
+    lines.append("单卡与第一卡强度按模板前缀类型（彩/黄/蓝/白/其他）分组，并在各组内独立排名。")
     lines.append("")
-    lines.append("| 卡牌 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 | 样本 |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
-    for row in cards[:20]:
-        lines.append(
-            f"| {row['key']} | {row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | "
-            f"{render_pct(row['top4_rate'])} | {render_pct(row['win_rate'])} | {row['appearances']} |"
-        )
-    lines.append("")
+    cards_by_prefix = data["rankings"]["cards"].get("single_cards_by_prefix", {})
+    if cards_by_prefix:
+        for prefix_type in CARD_PREFIX_TYPES:
+            prefix_rows = cards_by_prefix.get(prefix_type, [])
+            if not prefix_rows:
+                continue
+            lines.append(f"### {prefix_type}类单卡")
+            lines.append("")
+            lines.append("| 组内排名 | 卡牌 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 | 样本 |")
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+            for row in prefix_rows[:12]:
+                lines.append(
+                    f"| {row['prefix_rank']} | {row['key']} | {row['adjusted_avg_rank']:.2f} | "
+                    f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} | "
+                    f"{render_pct(row['win_rate'])} | {row['appearances']} |"
+                )
+            lines.append("")
+    else:
+        lines.append("| 卡牌 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 | 样本 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        for row in cards[:20]:
+            lines.append(
+                f"| {row['key']} | {row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | "
+                f"{render_pct(row['top4_rate'])} | {render_pct(row['win_rate'])} | {row['appearances']} |"
+            )
+        lines.append("")
     first_cards = data["rankings"]["cards"]["first_card_rankings"]
-    if first_cards:
+    first_cards_by_prefix = data["rankings"]["cards"].get("first_card_rankings_by_prefix", {})
+    if first_cards_by_prefix:
+        lines.append("### 第一张卡牌强度（分类型）")
+        lines.append("")
+        for prefix_type in CARD_PREFIX_TYPES:
+            prefix_rows = first_cards_by_prefix.get(prefix_type, [])
+            if not prefix_rows:
+                continue
+            lines.append(f"#### {prefix_type}类第一卡")
+            lines.append("")
+            lines.append("| 组内排名 | 第一卡 | 修正名次 | 平均名次 | 前四率 | 样本 |")
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
+            for row in prefix_rows[:8]:
+                lines.append(
+                    f"| {row['prefix_rank']} | {row['key']} | {row['adjusted_avg_rank']:.2f} | "
+                    f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} | {row['appearances']} |"
+                )
+            lines.append("")
+    elif first_cards:
         lines.append("### 第一张卡牌强度")
         lines.append("")
         lines.append("| 第一卡 | 修正名次 | 平均名次 | 前四率 | 样本 |")
@@ -1993,33 +2165,37 @@ def render_md(data: dict[str, Any]) -> str:
     lines.append("## 强势棋子与装备推荐")
     lines.append("")
     recommendations = data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
-    for row in recommendations[:15]:
-        hero = row["hero_stats"]
-        lines.append(
-            f"### {row['hero_name']}（主C率 {render_pct(hero['carry_rate'])}，avg {hero['avg_rank']:.2f}，n={hero['appearances']}）"
-        )
-        if row["recommended_items"]:
-            lines.append("")
-            lines.append("| 装备 | 修正名次 | 核选占比 | 核选优先级 | 样本 |")
-            lines.append("| --- | ---: | ---: | --- | ---: |")
-            for item in row["recommended_items"][:6]:
-                lines.append(
-                    f"| {item['equipment_name']} | {item['adjusted_avg_rank']:.2f} | "
-                    f"{render_pct(item['selected_rate'])} | {item['selected_priority']} | {item['appearances']} |"
-                )
-        if row.get("low_sample_observations"):
-            obs = " / ".join(
-                f"{item['equipment_name']}(修正{item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
-                for item in row["low_sample_observations"][:3]
-            )
-            lines.append(f"- 低样本观察：{obs}")
-        if row["recommended_sets"]:
-            sets = "；".join(
-                f"{item['equipment_set']}({item['adjusted_avg_rank']:.2f}, n={item['appearances']})"
-                for item in row["recommended_sets"][:3]
-            )
-            lines.append(f"- 常见三件套：{sets}")
+    with_items = sum(1 for row in recommendations if row.get("has_equipment_data"))
+    lines.append(
+        f"以下覆盖过滤后样本中出现的全部 **{len(recommendations)}** 个棋子；"
+        f"其中 **{with_items}** 个有可靠或低样本出装记录，其余标注为样本不足。"
+    )
+    lines.append("")
+    lines.append("排序：费用从低到高，同费按主C投入与名称。")
+    lines.append("")
+    top_carries = sorted(
+        recommendations,
+        key=lambda row: (
+            -row["hero_stats"].get("carry_appearances", 0),
+            row["hero_stats"].get("adjusted_avg_rank", 99),
+        ),
+    )[:8]
+    if top_carries:
+        lines.append("### 高投入主C速览")
         lines.append("")
+        for row in top_carries:
+            hero = row["hero_stats"]
+            top_items = row.get("recommended_items") or row.get("low_sample_observations") or []
+            item_hint = "、".join(item["equipment_name"] for item in top_items[:3]) or "出装样本不足"
+            lines.append(
+                f"- **{row['hero_name']}**：主C率 {render_pct(hero['carry_rate'])}，"
+                f"avg {hero['avg_rank']:.2f}，优先 {item_hint}"
+            )
+        lines.append("")
+    lines.append("### 全部棋子出装参考")
+    lines.append("")
+    for row in recommendations:
+        append_hero_equipment_block(lines, row)
 
     lines.append("## 羁绊表现与啾啾影响")
     lines.append("")
@@ -2084,8 +2260,14 @@ def render_md(data: dict[str, Any]) -> str:
         for row in rows[:8]:
             name = row.get("label") or row.get("hero_name") or row.get("key") or row.get("equipment_name")
             stats = row.get("stats", row)
+            prefix_note = ""
+            if key == "cards" and row.get("prefix_type"):
+                prefix_note = f"[{row['prefix_type']}类内] "
+            trap_reason = row.get("trap_reason")
+            reason_note = f"，{trap_reason}" if trap_reason else ""
             lines.append(
-                f"- {name}：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，n={stats['appearances']}"
+                f"- {prefix_note}{name}：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，"
+                f"n={stats['appearances']}{reason_note}"
             )
         lines.append("")
 
@@ -2179,6 +2361,20 @@ def html_trap_group(title: str, rows: list[dict[str, Any]]) -> str:
     return f"<div><h4>{esc(title)}</h4><ul>{items}</ul></div>"
 
 
+def html_prefix_card_sections(cards_by_prefix: dict[str, list[dict[str, Any]]], limit: int = 3) -> str:
+    sections: list[str] = []
+    for prefix_type in CARD_PREFIX_TYPES:
+        rows = cards_by_prefix.get(prefix_type, [])[:limit]
+        if not rows:
+            continue
+        items = "\n".join(
+            f"<li><b>{esc(row['key'])}</b><span>#{row['prefix_rank']} / 修正 {row['adjusted_avg_rank']:.2f}</span></li>"
+            for row in rows
+        )
+        sections.append(f"<div><h4>{esc(prefix_type)}类</h4><ul>{items}</ul></div>")
+    return "".join(sections) or "<div><h4>单卡</h4><ul><li>样本不足</li></ul></div>"
+
+
 def render_html(data: dict[str, Any]) -> str:
     quality = data["overview"]["quality"]
     recommendations = data["rankings"].get("composition_recommendations", {})
@@ -2203,7 +2399,7 @@ def render_html(data: dict[str, Any]) -> str:
             """
         )
 
-    top_cards = html_list_items(cards["single_cards"][:6])
+    top_cards = html_prefix_card_sections(cards.get("single_cards_by_prefix", {}))
     duo_cards = html_list_items(cards.get("duo_card_contribution", [])[:4])
     jiujiu_html = "\n".join(
         f"<li><b>{esc(row['equipment_name'])}</b><span>有效 {row['effective_appearances']} / {render_pct(row['effective_rate'])}</span></li>"
@@ -2297,9 +2493,9 @@ def render_html(data: dict[str, Any]) -> str:
   {''.join(comp_sections)}
   <section class="bottom">
     <div class="panel">
-      <h3>卡牌优先级</h3>
+      <h3>卡牌优先级（分类型）</h3>
       <div class="cards">
-        <div><h4>单卡</h4><ul>{top_cards}</ul></div>
+        <div>{top_cards}</div>
         <div><h4>第一卡贡献</h4><ul>{duo_cards}</ul></div>
       </div>
     </div>

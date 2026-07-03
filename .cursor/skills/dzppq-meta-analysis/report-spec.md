@@ -120,6 +120,8 @@ Primary card ranking:
 - single-card appearances, avg rank, top4 rate, win rate.
 - adjusted rank with global baseline and a small prior to reduce low-sample noise.
 - first-card rankings use `cards[0]`.
+- group single-card and first-card rankings by card template prefix type (`彩` / `黄` / `蓝` / `白` / `其他`) and rank within each group; do not compare different prefix types on one leaderboard.
+- unprefixed disambiguated labels such as `吸吸宝pro` and `快速成型` should inherit their source prefix type for grouping; `蓝·重质也重量pro` and `蓝·拍档支援` keep their template prefix directly.
 
 Secondary card views:
 

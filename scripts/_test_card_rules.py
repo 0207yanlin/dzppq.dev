@@ -24,17 +24,21 @@ def test_normalize_aliases() -> None:
 def test_quality_weight_pro_with_three_stars() -> None:
     heroes = [{"stars": 3}, {"stars": 3}, {"stars": 3}]
     assert (
-        resolve_card_label("重质拍档支援", 0, heroes) == "重质也重量pro"
+        resolve_card_label("重质拍档支援", 0, heroes) == "蓝·重质也重量pro"
     )
     assert (
-        resolve_card_label("最强支援", 2, heroes) == "重质也重量pro"
+        resolve_card_label("最强支援", 2, heroes) == "蓝·重质也重量pro"
+    )
+    assert (
+        resolve_card_label("蓝·重质拍档支援", 0, heroes) == "蓝·重质也重量pro"
     )
 
 
 def test_quality_weight_pro_without_three_stars() -> None:
     heroes = [{"stars": 2}, {"stars": 2}]
-    assert resolve_card_label("重质拍档支援", 0, heroes) == "拍档支援"
-    assert resolve_card_label("最佳拍档", 0, heroes) == "拍档支援"
+    assert resolve_card_label("重质拍档支援", 0, heroes) == "蓝·拍档支援"
+    assert resolve_card_label("最佳拍档", 0, heroes) == "蓝·拍档支援"
+    assert resolve_card_label("蓝·重质拍档支援", 0, heroes) == "蓝·拍档支援"
 
 
 def test_fast_xxb_second_slot() -> None:
@@ -43,11 +47,21 @@ def test_fast_xxb_second_slot() -> None:
     assert resolve_card_label("快速成型", 0, heroes) == "快速成型"
 
 
+def test_fast_xxb_merged_yellow_template() -> None:
+    heroes = [{"stars": 1}]
+    merged = "黄·吸吸宝pro快速成型"
+    assert resolve_card_label(merged, 1, heroes) == "吸吸宝pro"
+    assert resolve_card_label(merged, 0, heroes) == "快速成型"
+    assert resolve_card_label(merged, 2, heroes) == "快速成型"
+    assert normalize_card_label(merged) == "黄·快速成型"
+
+
 def main() -> None:
     test_normalize_aliases()
     test_quality_weight_pro_with_three_stars()
     test_quality_weight_pro_without_three_stars()
     test_fast_xxb_second_slot()
+    test_fast_xxb_merged_yellow_template()
     print("card_rules tests passed")
 
 
