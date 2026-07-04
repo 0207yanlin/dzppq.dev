@@ -59,7 +59,7 @@ Represent each player board as:
 - `hero_set`: all known heroes.
 - `level`: number of known heroes, capped for reporting as 7/8/9.
 - `main_bond`: active bond with highest tier, breaking ties by count and name.
-- `carry_names`: top 1-2 carry-score heroes.
+- `carry_names`: top 3 carry-score heroes.
 - `comp_signature`: main bond plus carry names.
 
 Cluster boards into comp families:
@@ -76,11 +76,12 @@ Cluster boards into comp families:
 
 For each comp family, report:
 
-- Representative 7/8/9-level hero lists from best-ranked samples.
-- Main carry and alternate carry.
-- Main carry minimum star recommendation, median top4 stars, and three-item coverage.
+- Representative 7/8/9-level hero lists from best-ranked samples, plus per-variant bond attainment notes.
+- Main carry and up to two alternate carries, with explicit priority ranking.
+- Main carry minimum star recommendation, average top4 stars, and three-item coverage.
 - For 4-cost and 5-cost carries, cap normal star recommendation at 2 stars. If 3-star high-cost samples dominate, mark the comp as high-cost ceiling dependent instead of recommending 3 stars.
 - Key carry equipment: mark only sufficiently supported items as required; otherwise label as high-value or observation.
+- Jiujiu dependency when the title bond tier requires `X啾啾`: dependency rate, recommended jiujiu item, and recommended wearer heroes.
 - Core bond tiers and common sub-bonds.
 - Average rank, top4 rate, win rate, sample size, confidence.
 - Mature stage and transition stages. Transition stages contribute to formation difficulty and trap analysis but should not become separate top-level recommendations when they are the same strategy.
@@ -113,6 +114,8 @@ Popularity combines:
 
 Use labels: low, medium, high. Explain when a comp is strong but hard to complete or popular enough to be contested.
 
+Also publish an overall strength rank per strategy that combines post-formation performance (avg rank, top4, win rate) with formation difficulty (unfinished pressure, contest pressure, equipment completeness).
+
 ## Card Analysis
 
 Primary card ranking:
@@ -144,6 +147,8 @@ For each hero:
 - required/high-value equipment notes when with-item performance clearly beats without-item performance.
 - Sort main equipment recommendations by sample size first, then adjusted rank/top4. Low-sample high-roll items belong in an observation note.
 - common 3-item sets when enough complete samples exist.
+
+Export the full per-hero equipment tables to `data/latest_meta_analysis_equipment.xlsx`. The Markdown report should only keep a short high-investment carry overview and link to the Excel file.
 
 ## Jiujiu Analysis
 
@@ -205,5 +210,16 @@ Use this Markdown shape:
 Also write `data/latest_meta_analysis_report.html`:
 
 - fixed-width poster around 1080px, designed for a 3:4 screenshot.
-- show sample summary, top strategy comps split by `赌狗`/`高费`, mature lineup, deduped transition path, carry requirements, card picks, jiujiu highlights, and structured traps.
+- show sample summary, top strategy comps split by `赌狗`/`高费`, mature lineup, deduped transition path, top 3 carry requirements, jiujiu dependency notes, card picks, jiujiu highlights, and structured traps.
 - do not mirror the full Markdown report; keep the HTML concise and visual.
+
+## Excel Equipment Output
+
+Also write `data/latest_meta_analysis_equipment.xlsx`:
+
+- sheet `全英雄出装`: per-hero recommended items with rank order and selected-equipment priority.
+- sheet `阵容主C关键装备`: comp-scoped carry equipment notes.
+- sheet `常见三件套`: common 3-item sets.
+- sheet `低样本观察`: low-sample equipment observations.
+
+Requires `openpyxl`.

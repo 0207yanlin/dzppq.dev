@@ -25,6 +25,7 @@ from src.card_rules import split_card_prefix  # noqa: E402
 DEFAULT_JSON = ROOT / "data" / "latest_meta_analysis.json"
 DEFAULT_MD = ROOT / "data" / "latest_meta_analysis_report.md"
 DEFAULT_HTML = ROOT / "data" / "latest_meta_analysis_report.html"
+DEFAULT_XLSX = ROOT / "data" / "latest_meta_analysis_equipment.xlsx"
 
 CARD_GRANTED_HEROES = {"暴龙虾饺"}
 PLAY_STYLES = ("赌狗", "高费")
@@ -83,6 +84,7 @@ class PlayerFeature:
     secondary_carry: Hero | None
     hero_set: set[str]
     level: int
+    carry_candidates: list[Hero] = field(default_factory=list)
     family_id: int | None = None
     team_rank: int | None = None
     team_best_rank: int | None = None
@@ -520,6 +522,7 @@ def load_player_features(
             key=lambda hero: (hero.carry_score, -hero.slot_index, hero.name),
             reverse=True,
         )
+        carry_candidates = carries[:3]
         features.append(
             PlayerFeature(
                 player_id=player_id,
@@ -534,8 +537,9 @@ def load_player_features(
                 trait_totals=trait_totals,
                 active_traits=active_traits,
                 main_bond=main_bond,
-                main_carry=carries[0] if carries else None,
-                secondary_carry=carries[1] if len(carries) > 1 else None,
+                main_carry=carry_candidates[0] if carry_candidates else None,
+                secondary_carry=carry_candidates[1] if len(carry_candidates) > 1 else None,
+                carry_candidates=carry_candidates,
                 hero_set={hero.name for hero in heroes if is_lineup_hero(hero.name)},
                 level=level_label(sum(1 for hero in heroes if is_lineup_hero(hero.name))),
             )
@@ -701,6 +705,22 @@ def composition_recommendation_score(row: dict[str, Any]) -> float:
     return round(score, 4)
 
 
+def overall_strength_score(row: dict[str, Any]) -> float:
+    stats = row["stats"]
+    difficulty_score = row["difficulty"].get("score", 0.5)
+    n = stats["appearances"]
+    score = stats["avg_rank"]
+    score -= stats["top4_rate"] / 100.0 * 0.45
+    score -= stats["win_rate"] / 100.0 * 0.2
+    score += difficulty_score * 0.75
+    score -= min(n, 80) / 80.0 * 0.25
+    if n < 10:
+        score += 1.2
+    elif n < 20:
+        score += 0.4
+    return round(score, 4)
+
+
 def build_composition_row(
     members: list[PlayerFeature],
     family_id: int,
@@ -713,12 +733,20 @@ def build_composition_row(
     stats = RankStats()
     hero_counter: Counter[str] = Counter()
     carry_counter: Counter[str] = Counter()
+    carry_score_sums: dict[str, float] = defaultdict(float)
+    carry_score_counts: Counter[str] = Counter()
     active_bond_counter: Counter[str] = Counter()
     for member in members:
         stats.add(member.rank)
         hero_counter.update(member.hero_set)
-        if member.main_carry:
-            carry_counter[member.main_carry.name] += 1
+        seen_carries: set[str] = set()
+        for hero in member.carry_candidates[:3]:
+            if hero.name in seen_carries:
+                continue
+            seen_carries.add(hero.name)
+            carry_counter[hero.name] += 1
+            carry_score_sums[hero.name] += hero.carry_score
+            carry_score_counts[hero.name] += 1
         for trait, tier in member.active_traits.items():
             active_bond_counter[f"{trait}-{tier}"] += 1
 
@@ -746,11 +774,11 @@ def build_composition_row(
     popularity_score = pick_rate / 20.0 + avg_contest / 3.0 + match_share / 80.0
     popularity = "高" if popularity_score >= 1.5 else "中" if popularity_score >= 0.8 else "低"
 
-    variants = build_level_variants(members, hero_counter)
     top_bonds = active_bond_counter.most_common(8)
     main_carries = carry_counter.most_common(3)
     label_info = derive_family_label(members, active_bond_counter, main_carries)
     main_bond = subfamily_key or label_info["key"]
+    variants = build_level_variants(members, hero_counter, main_bond=main_bond)
     if subfamily_key:
         label_info = {
             **label_info,
@@ -771,6 +799,7 @@ def build_composition_row(
     play_style, play_style_breakdown = play_style_summary(members)
     carry_requirements = summarize_carry_requirements(members, main_carries)
     carry_equipment_notes = summarize_comp_carry_equipment(members, main_carries)
+    jiujiu_requirements = analyze_comp_jiujiu_dependency(members, main_bond)
     high_cost_three_star_dependency = any(
         row.get("high_cost_three_star_dependency") for row in carry_requirements
     )
@@ -784,8 +813,16 @@ def build_composition_row(
         "label_confidence": label_info.get("label_confidence", "中"),
         "label_reason": label_info.get("label_reason", ""),
         "main_carries": [
-            {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
-            for name, count in main_carries
+            {
+                "hero_name": name,
+                "share": round(count * 100.0 / len(members), 1),
+                "carry_rank": rank,
+                "avg_carry_score": round(
+                    carry_score_sums[name] / max(carry_score_counts[name], 1),
+                    1,
+                ),
+            }
+            for rank, (name, count) in enumerate(main_carries, start=1)
         ],
         "core_heroes": [
             {"hero_name": name, "share": round(count * 100.0 / len(members), 1)}
@@ -797,15 +834,18 @@ def build_composition_row(
         "variants": variants,
         "carry_requirements": carry_requirements,
         "carry_equipment_notes": carry_equipment_notes,
+        "jiujiu_requirements": jiujiu_requirements,
         "stats": stats.to_dict(),
         "difficulty": {
             "label": difficulty,
+            "score": round(difficulty_score, 3),
             "unfinished_bottom_rate": round(unfinished_rate, 1),
             "carry_complete_rate": round(carry_complete_rate, 1),
             "avg_same_match_contest": round(avg_contest, 2),
         },
         "popularity": {
             "label": popularity,
+            "score": round(popularity_score, 3),
             "pick_rate": round(pick_rate, 1),
             "match_share": round(match_share, 1),
             "avg_same_match_contest": round(avg_contest, 2),
@@ -815,6 +855,7 @@ def build_composition_row(
         "high_cost_three_star_dependency": high_cost_three_star_dependency,
     }
     row["recommendation_score"] = composition_recommendation_score(row)
+    row["overall_strength_score"] = overall_strength_score(row)
     return row
 
 
@@ -900,7 +941,7 @@ def trait_name_from_bond_key(key: str) -> str:
 
 
 def strategy_carry_key(row: dict[str, Any]) -> str:
-    names = sorted(item["hero_name"] for item in row.get("main_carries", [])[:2])
+    names = sorted(item["hero_name"] for item in row.get("main_carries", [])[:3])
     return "+".join(names) or row["label"]
 
 
@@ -989,11 +1030,14 @@ def merge_comp_strategies(
 
     strategies.sort(
         key=lambda row: (
+            row["overall_strength_score"],
             row["recommendation_score"],
             -row["aggregate_stats"]["appearances"],
             row["aggregate_stats"]["avg_rank"],
         )
     )
+    for rank, strategy in enumerate(strategies, start=1):
+        strategy["strength_rank"] = rank
     return strategies
 
 
@@ -1007,9 +1051,127 @@ def build_composition_recommendations(
     }
 
 
+def avg_number(values: list[int | float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def carry_for_name(feature: PlayerFeature, hero_name: str) -> Hero | None:
+    for hero in feature.carry_candidates[:3]:
+        if hero.name == hero_name:
+            return hero
+    if feature.main_carry and feature.main_carry.name == hero_name:
+        return feature.main_carry
+    return None
+
+
+def compute_variant_bond_status(
+    feature: PlayerFeature,
+    main_bond: str | None,
+) -> dict[str, Any] | None:
+    if not main_bond or main_bond == "拼多多" or "-" not in main_bond:
+        return None
+    _, dict_bond = load_game_config()
+    trait, target_tier = parse_trait_tier(main_bond)
+    thresholds = dict_bond.get(trait, [])
+    if not thresholds:
+        return None
+    hero_only_tier = active_tier(feature.trait_counts.get(trait, 0), thresholds)
+    actual_tier = feature.active_traits.get(trait, 0)
+    jiujiu_wearers: list[dict[str, str]] = []
+    for hero in feature.heroes:
+        for equipment in hero.equipments:
+            if jiujiu_trait(equipment.raw_name) == trait:
+                jiujiu_wearers.append(
+                    {"hero_name": hero.name, "equipment_name": equipment.name}
+                )
+    return {
+        "trait": trait,
+        "target_tier": target_tier,
+        "hero_only_tier": hero_only_tier,
+        "actual_tier": actual_tier,
+        "needs_jiujiu": hero_only_tier < target_tier and actual_tier >= target_tier,
+        "meets_title_bond": actual_tier >= target_tier,
+        "jiujiu_wearers": jiujiu_wearers,
+        "active_traits": dict(feature.active_traits),
+        "jiujiu_bonus": dict(feature.jiujiu_bonus),
+    }
+
+
+def analyze_comp_jiujiu_dependency(
+    members: list[PlayerFeature],
+    main_bond: str,
+) -> list[dict[str, Any]]:
+    if not main_bond or main_bond == "拼多多" or "-" not in main_bond:
+        return []
+    _, dict_bond = load_game_config()
+    trait, target_tier = parse_trait_tier(main_bond)
+    thresholds = dict_bond.get(trait, [])
+    if not thresholds:
+        return []
+
+    dependency_samples = 0
+    wearer_counter: Counter[str] = Counter()
+    jiujiu_item_counter: Counter[str] = Counter()
+    for member in members:
+        hero_only_tier = active_tier(member.trait_counts.get(trait, 0), thresholds)
+        actual_tier = member.active_traits.get(trait, 0)
+        if hero_only_tier < target_tier and actual_tier >= target_tier:
+            dependency_samples += 1
+            for hero in member.heroes:
+                for equipment in hero.equipments:
+                    if jiujiu_trait(equipment.raw_name) == trait:
+                        wearer_counter[hero.name] += 1
+                        jiujiu_item_counter[equipment.name] += 1
+
+    if dependency_samples == 0:
+        return []
+
+    dependency_rate = dependency_samples * 100.0 / len(members)
+    recommended_jiujiu = (
+        jiujiu_item_counter.most_common(1)[0][0]
+        if jiujiu_item_counter
+        else f"{trait}啾啾"
+    )
+    return [
+        {
+            "trait": trait,
+            "target_tier": target_tier,
+            "dependency_rate": round(dependency_rate, 1),
+            "dependency_samples": dependency_samples,
+            "recommended_jiujiu": recommended_jiujiu,
+            "recommended_wearers": [
+                {
+                    "hero_name": name,
+                    "share": round(count * 100.0 / dependency_samples, 1),
+                }
+                for name, count in wearer_counter.most_common(4)
+            ],
+        }
+    ]
+
+
+def variant_bond_note(bond_status: dict[str, Any] | None) -> str:
+    if not bond_status:
+        return "—"
+    trait = bond_status["trait"]
+    target = bond_status["target_tier"]
+    if bond_status["meets_title_bond"]:
+        if bond_status["needs_jiujiu"]:
+            wearers = "、".join(
+                item["hero_name"] for item in bond_status.get("jiujiu_wearers", [])[:2]
+            )
+            return f"需{trait}啾啾({wearers or '待观察'})"
+        return f"已达成{trait}-{target}"
+    return f"未达{trait}-{target}(纯{trait}{bond_status['hero_only_tier']})"
+
+
 def build_level_variants(
     members: list[PlayerFeature],
     family_hero_counter: Counter[str],
+    *,
+    main_bond: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     variants: dict[str, dict[str, Any]] = {}
     hero_order = [name for name, _ in family_hero_counter.most_common()]
@@ -1021,12 +1183,17 @@ def build_level_variants(
         ]
         if exact:
             best = sorted(exact, key=lambda item: (item.rank, -len(item.hero_set)))[0]
+            bond_status = compute_variant_bond_status(best, main_bond)
             variants[str(target)] = {
                 "source": "sample",
                 "confidence": confidence_label(len(exact)),
                 "rank": best.rank,
                 "heroes": unique_heroes_by_slot(best),
                 "main_carry": best.main_carry.name if best.main_carry else None,
+                "sample_count": len(exact),
+                "bond_status": bond_status,
+                "bond_note": variant_bond_note(bond_status),
+                "jiujiu_wearers": bond_status.get("jiujiu_wearers", []) if bond_status else [],
             }
         else:
             variants[str(target)] = {
@@ -1035,6 +1202,10 @@ def build_level_variants(
                 "rank": None,
                 "heroes": hero_order[:target],
                 "main_carry": members[0].main_carry.name if members and members[0].main_carry else None,
+                "sample_count": 0,
+                "bond_status": None,
+                "bond_note": "推导阵容，未绑定样本羁绊",
+                "jiujiu_wearers": [],
             }
     return variants
 
@@ -1060,12 +1231,6 @@ def median_number(values: list[int]) -> float | None:
     if len(values) % 2 == 1:
         return float(values[mid])
     return (values[mid - 1] + values[mid]) / 2.0
-
-
-def carry_for_name(feature: PlayerFeature, hero_name: str) -> Hero | None:
-    if feature.main_carry and feature.main_carry.name == hero_name:
-        return feature.main_carry
-    return None
 
 
 def summarize_carry_requirements(
@@ -1123,7 +1288,7 @@ def summarize_carry_requirements(
                 "samples": len(carry_samples),
                 "top4_samples": len(top4_samples),
                 "min_stars_top4": min(stars),
-                "median_stars_top4": median_number(stars),
+                "avg_stars_top4": round(avg_number(stars) or 0, 2),
                 "recommended_min_stars": recommended_star,
                 "high_cost_three_star_dependency": high_cost_three_star_dependency,
                 "two_star_rate": round(two_star_rate, 1),
@@ -1405,7 +1570,7 @@ def analyze_heroes_and_equipment(
         for hero in feature.heroes:
             hero_stats[hero.name].add(feature.rank)
             hero_tiers.setdefault(hero.name, hero.tier)
-            if feature.main_carry and hero.id == feature.main_carry.id:
+            if any(hero.id == candidate.id for candidate in feature.carry_candidates[:3]):
                 carry_stats[hero.name].add(feature.rank)
             equipment_names = []
             for equipment in hero.equipments:
@@ -1641,10 +1806,7 @@ def classify_jiujiu_sample(
     reasons: list[str] = []
     if any(jiujiu_matches_strategy_bond(trait, comp) for comp in comps):
         reasons.append("final_bond")
-    is_key_hero = (
-        (feature.main_carry and hero.id == feature.main_carry.id)
-        or (feature.secondary_carry and hero.id == feature.secondary_carry.id)
-    )
+    is_key_hero = any(hero.id == candidate.id for candidate in feature.carry_candidates[:3])
     if is_key_hero and feature.rank <= 4 and hero.equipment_count >= 2:
         reasons.append("hero_boost")
     return reasons
@@ -1887,7 +2049,8 @@ def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
         f"- 表现：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，吃鸡 {render_pct(stats['win_rate'])}。"
     )
     carries = "、".join(
-        f"{item['hero_name']}({render_pct(item['share'])})" for item in comp["main_carries"]
+        f"P{item.get('carry_rank', idx)} {item['hero_name']}({render_pct(item['share'])})"
+        for idx, item in enumerate(comp["main_carries"], start=1)
     )
     lines.append(f"- 主C判断：{carries or '样本不足'}。")
     breakdown = "、".join(
@@ -1899,22 +2062,22 @@ def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
     if comp.get("carry_requirements"):
         req_text = "；".join(
             f"{row['hero_name']}建议至少{row['recommended_min_stars']}星"
-            f"（前四中位{row['median_stars_top4']:.1f}星，三件套{render_pct(row['three_item_rate'])}）"
-            for row in comp["carry_requirements"][:2]
+            f"（前四平均{row['avg_stars_top4']:.1f}星，三件套{render_pct(row['three_item_rate'])}）"
+            for row in comp["carry_requirements"][:3]
         )
         lines.append(f"- 主C成型门槛：{req_text}。")
         expensive_note = [
             row["hero_name"]
-            for row in comp["carry_requirements"][:2]
+            for row in comp["carry_requirements"][:3]
             if row.get("high_cost_three_star_dependency")
         ]
         if expensive_note:
             lines.append(
-                f"- 成型成本提醒：{ '、'.join(expensive_note) } 的三星高费样本会拉高上限，常规推荐按 2 星门槛评估。"
+                f"- 成型成本提醒：{'、'.join(expensive_note)} 的三星高费样本会拉高上限，常规推荐按 2 星门槛评估。"
             )
     if comp.get("carry_equipment_notes"):
         note_parts = []
-        for note in comp["carry_equipment_notes"][:2]:
+        for note in comp["carry_equipment_notes"][:3]:
             important = [
                 item
                 for item in note["items"]
@@ -1930,17 +2093,31 @@ def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
                 )
         if note_parts:
             lines.append(f"- 主C关键装备：{'；'.join(note_parts)}。")
+    if comp.get("jiujiu_requirements"):
+        jiujiu_parts = []
+        for req in comp["jiujiu_requirements"]:
+            wearers = "、".join(
+                f"{item['hero_name']}({render_pct(item['share'])})"
+                for item in req.get("recommended_wearers", [])[:3]
+            )
+            jiujiu_parts.append(
+                f"{req['recommended_jiujiu']}（{render_pct(req['dependency_rate'])}样本需啾啾开"
+                f"{req['trait']}-{req['target_tier']}，推荐穿戴：{wearers or '待观察'}）"
+            )
+        if jiujiu_parts:
+            lines.append(f"- 啾啾成型：{'；'.join(jiujiu_parts)}。")
     bonds = "、".join(
         f"{item['bond']}({render_pct(item['share'])})" for item in comp["common_bonds"][:5]
     )
     lines.append(f"- 常见羁绊：{bonds or '无稳定羁绊'}。")
     lines.append("")
-    lines.append("| 等级 | 来源 | 置信度 | 棋子 |")
-    lines.append("| ---: | --- | --- | --- |")
+    lines.append("| 等级 | 来源 | 置信度 | 羁绊达成 | 棋子 |")
+    lines.append("| ---: | --- | --- | --- | --- |")
     for level in ("7", "8", "9"):
         variant = comp["variants"][level]
         lines.append(
             f"| {level} | {variant['source']} | {variant['confidence']} | "
+            f"{variant.get('bond_note', '—')} | "
             f"{'、'.join(variant['heroes'])} |"
         )
     lines.append("")
@@ -2041,13 +2218,25 @@ def render_md(data: dict[str, Any]) -> str:
 
     lines.append("## 阵容成型难度与热门程度")
     lines.append("")
-    lines.append("| 阵容 | 类型 | 难度 | 热门 | 后四未成型率 | 同行数 | 出场率 |")
-    lines.append("| --- | --- | --- | --- | ---: | ---: | ---: |")
-    for comp in comps[:12]:
+    lines.append(
+        "强度排名综合成型后表现（平均名次、前四率、吃鸡率）与成型难度（未成型后四率、同行压力、装备完整率）。"
+    )
+    lines.append("")
+    strength_sorted = sorted(
+        comps,
+        key=lambda row: (
+            row.get("strength_rank", 999),
+            row.get("overall_strength_score", 99),
+        ),
+    )
+    lines.append("| 强度排名 | 阵容 | 类型 | 难度 | 热门 | 后四未成型率 | 同行数 | 出场率 |")
+    lines.append("| ---: | --- | --- | --- | --- | ---: | ---: | ---: |")
+    for comp in strength_sorted[:12]:
         difficulty = comp["difficulty"]
         popularity = comp["popularity"]
         lines.append(
-            f"| {comp['label']} | {comp.get('play_style', '高费')} | {difficulty['label']} | {popularity['label']} | "
+            f"| {comp.get('strength_rank', '—')} | {comp['label']} | {comp.get('play_style', '高费')} | "
+            f"{difficulty['label']} | {popularity['label']} | "
             f"{render_pct(difficulty['unfinished_bottom_rate'])} | "
             f"{difficulty['avg_same_match_contest']:.2f} | {render_pct(popularity['pick_rate'])} |"
         )
@@ -2165,10 +2354,12 @@ def render_md(data: dict[str, Any]) -> str:
     lines.append("## 强势棋子与装备推荐")
     lines.append("")
     recommendations = data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
+    equipment_xlsx = data.get("outputs", {}).get("equipment_xlsx", "data/latest_meta_analysis_equipment.xlsx")
     with_items = sum(1 for row in recommendations if row.get("has_equipment_data"))
     lines.append(
-        f"以下覆盖过滤后样本中出现的全部 **{len(recommendations)}** 个棋子；"
-        f"其中 **{with_items}** 个有可靠或低样本出装记录，其余标注为样本不足。"
+        f"每位英雄的详细出装推荐已导出至 **`{equipment_xlsx}`**（Excel），"
+        f"覆盖过滤后样本中出现的全部 **{len(recommendations)}** 个棋子；"
+        f"其中 **{with_items}** 个有可靠或低样本出装记录。"
     )
     lines.append("")
     lines.append("排序：费用从低到高，同费按主C投入与名称。")
@@ -2189,13 +2380,9 @@ def render_md(data: dict[str, Any]) -> str:
             item_hint = "、".join(item["equipment_name"] for item in top_items[:3]) or "出装样本不足"
             lines.append(
                 f"- **{row['hero_name']}**：主C率 {render_pct(hero['carry_rate'])}，"
-                f"avg {hero['avg_rank']:.2f}，优先 {item_hint}"
+                f"avg {hero['avg_rank']:.2f}，优先 {item_hint}（详见 Excel）"
             )
         lines.append("")
-    lines.append("### 全部棋子出装参考")
-    lines.append("")
-    for row in recommendations:
-        append_hero_equipment_block(lines, row)
 
     lines.append("## 羁绊表现与啾啾影响")
     lines.append("")
@@ -2313,9 +2500,19 @@ def html_comp_card(comp: dict[str, Any]) -> str:
     variant = variants.get("8") or variants.get("9") or variants.get("7") or {}
     heroes = " / ".join(variant.get("heroes", [])[:9]) or "样本不足"
     req_text = "；".join(
-        f"{row['hero_name']} {row['recommended_min_stars']}星起"
-        for row in comp.get("carry_requirements", [])[:2]
+        f"{row['hero_name']} {row['recommended_min_stars']}星起(前四均{row['avg_stars_top4']:.1f})"
+        for row in comp.get("carry_requirements", [])[:3]
     )
+    carry_text = " > ".join(
+        f"P{item.get('carry_rank', idx)} {item['hero_name']}"
+        for idx, item in enumerate(comp.get("main_carries", [])[:3], start=1)
+    )
+    jiujiu_text = "；".join(
+        f"{req['recommended_jiujiu']}→"
+        + "、".join(item["hero_name"] for item in req.get("recommended_wearers", [])[:2])
+        for req in comp.get("jiujiu_requirements", [])
+    )
+    bond_note = variant.get("bond_note", "")
     breakdown = " · ".join(
         f"{row['play_style']}{render_pct(row['share'])}"
         for row in comp.get("play_style_breakdown", [])[:2]
@@ -2331,8 +2528,11 @@ def html_comp_card(comp: dict[str, Any]) -> str:
         <b>Top4 {render_pct(comp['stats']['top4_rate'])}</b>
         <b>n={comp['stats']['appearances']}</b>
       </div>
+      <p><strong>主C：</strong>{esc(carry_text or '样本不足')}</p>
       <p><strong>成型：</strong>{esc(req_text or '样本不足')}</p>
       <p><strong>路线：</strong>{esc(unique_route_bonds(comp))}</p>
+      <p><strong>羁绊：</strong>{esc(bond_note or '—')}</p>
+      <p><strong>啾啾：</strong>{esc(jiujiu_text or '无明确依赖')}</p>
       <p><strong>类型样本：</strong>{esc(breakdown or comp.get('play_style', '高费'))}</p>
       <p class="lineup">{esc(heroes)}</p>
     </article>
@@ -2512,20 +2712,217 @@ def render_html(data: dict[str, Any]) -> str:
       <p>赌狗看低费主C与三星信号，高费看8级以上无低费三星的大成样本；低样本高胜只作观察。</p>
     </div>
   </section>
-  <footer>完整数据见 latest_meta_analysis_report.md / latest_meta_analysis.json</footer>
+  <footer>完整数据见 latest_meta_analysis_report.md / latest_meta_analysis.json / latest_meta_analysis_equipment.xlsx</footer>
 </main>
 </body>
 </html>
 """
 
 
-def write_outputs(data: dict[str, Any], json_path: Path, md_path: Path, html_path: Path) -> None:
+def _xlsx_header_style():
+    try:
+        from openpyxl.styles import Font, PatternFill
+
+        return Font(bold=True), PatternFill("solid", fgColor="E8EEF7")
+    except ImportError:
+        return None, None
+
+
+def _write_xlsx_sheet(ws, headers: list[str], rows: list[list[Any]]) -> None:
+    header_font, header_fill = _xlsx_header_style()
+    ws.append(headers)
+    if header_font and header_fill:
+        for cell in ws[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+    for row in rows:
+        ws.append(row)
+    for column in ws.columns:
+        max_len = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[column_letter].width = min(max_len + 2, 48)
+
+
+def render_xlsx(data: dict[str, Any], xlsx_path: Path) -> None:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise SystemExit(
+            "Excel export requires openpyxl. Install with: pip install openpyxl"
+        ) from exc
+
+    wb = Workbook()
+    hero_rows: list[list[Any]] = []
+    set_rows: list[list[Any]] = []
+    low_sample_rows: list[list[Any]] = []
+    recommendations = data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
+    for rec in recommendations:
+        hero = rec["hero_stats"]
+        for rank, item in enumerate(rec.get("recommended_items", []), start=1):
+            hero_rows.append(
+                [
+                    rec["hero_name"],
+                    hero.get("tier"),
+                    hero.get("carry_rate"),
+                    hero.get("avg_rank"),
+                    hero.get("appearances"),
+                    rank,
+                    item["equipment_name"],
+                    item.get("adjusted_avg_rank"),
+                    item.get("avg_rank"),
+                    item.get("top4_rate"),
+                    item.get("appearances"),
+                    item.get("selected_rate"),
+                    item.get("selected_priority"),
+                    item.get("sample_quality"),
+                ]
+            )
+        for rank, item in enumerate(rec.get("low_sample_observations", []), start=1):
+            low_sample_rows.append(
+                [
+                    rec["hero_name"],
+                    hero.get("tier"),
+                    rank,
+                    item["equipment_name"],
+                    item.get("adjusted_avg_rank"),
+                    item.get("avg_rank"),
+                    item.get("top4_rate"),
+                    item.get("appearances"),
+                    item.get("selected_rate"),
+                    item.get("selected_priority"),
+                ]
+            )
+        for rank, item in enumerate(rec.get("recommended_sets", []), start=1):
+            set_rows.append(
+                [
+                    rec["hero_name"],
+                    hero.get("tier"),
+                    rank,
+                    item.get("equipment_set"),
+                    item.get("adjusted_avg_rank"),
+                    item.get("avg_rank"),
+                    item.get("top4_rate"),
+                    item.get("appearances"),
+                ]
+            )
+
+    ws_hero = wb.active
+    ws_hero.title = "全英雄出装"
+    _write_xlsx_sheet(
+        ws_hero,
+        [
+            "英雄",
+            "费用",
+            "主C率(%)",
+            "英雄平均名次",
+            "英雄样本",
+            "装备顺位",
+            "装备",
+            "修正名次",
+            "平均名次",
+            "前四率(%)",
+            "样本",
+            "核选占比(%)",
+            "核选优先级",
+            "样本质量",
+        ],
+        hero_rows,
+    )
+
+    ws_comp = wb.create_sheet("阵容主C关键装备")
+    comp_rows: list[list[Any]] = []
+    for comp in data["rankings"].get("compositions", []):
+        for note in comp.get("carry_equipment_notes", []):
+            for rank, item in enumerate(note.get("items", []), start=1):
+                comp_rows.append(
+                    [
+                        comp.get("label"),
+                        comp.get("play_style"),
+                        note.get("hero_name"),
+                        rank,
+                        item.get("equipment_name"),
+                        item.get("label"),
+                        item.get("appearances"),
+                        item.get("use_rate"),
+                        item.get("with_avg_rank"),
+                        item.get("without_avg_rank"),
+                        item.get("without_item_penalty"),
+                        item.get("with_top4_rate"),
+                        item.get("selected_rate"),
+                    ]
+                )
+    _write_xlsx_sheet(
+        ws_comp,
+        [
+            "阵容",
+            "类型",
+            "主C",
+            "装备顺位",
+            "装备",
+            "标签",
+            "样本",
+            "使用率(%)",
+            "带装平均名次",
+            "不带平均名次",
+            "不带惩罚",
+            "带装前四率(%)",
+            "核选占比(%)",
+        ],
+        comp_rows,
+    )
+
+    ws_sets = wb.create_sheet("常见三件套")
+    _write_xlsx_sheet(
+        ws_sets,
+        ["英雄", "费用", "组合顺位", "三件套", "修正名次", "平均名次", "前四率(%)", "样本"],
+        set_rows,
+    )
+
+    ws_low = wb.create_sheet("低样本观察")
+    _write_xlsx_sheet(
+        ws_low,
+        [
+            "英雄",
+            "费用",
+            "观察顺位",
+            "装备",
+            "修正名次",
+            "平均名次",
+            "前四率(%)",
+            "样本",
+            "核选占比(%)",
+            "核选优先级",
+        ],
+        low_sample_rows,
+    )
+
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(xlsx_path)
+
+
+def write_outputs(
+    data: dict[str, Any],
+    json_path: Path,
+    md_path: Path,
+    html_path: Path,
+    xlsx_path: Path,
+) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.parent.mkdir(parents=True, exist_ok=True)
+    data["outputs"] = {
+        "equipment_xlsx": rel(xlsx_path),
+        "json": rel(json_path),
+        "markdown": rel(md_path),
+        "html": rel(html_path),
+    }
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     md_path.write_text(render_md(data), encoding="utf-8")
     html_path.write_text(render_html(data), encoding="utf-8")
+    render_xlsx(data, xlsx_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2534,6 +2931,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", type=Path, default=DEFAULT_JSON, help="JSON output path")
     parser.add_argument("--md", type=Path, default=DEFAULT_MD, help="Markdown output path")
     parser.add_argument("--html", type=Path, default=DEFAULT_HTML, help="HTML poster output path")
+    parser.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX, help="Excel equipment output path")
     parser.add_argument("--balance-notes", type=Path, default=None, help="Optional balance notes file")
     parser.add_argument("--min-comp-apps", type=int, default=5)
     parser.add_argument("--min-entity-apps", type=int, default=10)
@@ -2547,10 +2945,12 @@ def main() -> None:
     json_path = args.json if args.json.is_absolute() else ROOT / args.json
     md_path = args.md if args.md.is_absolute() else ROOT / args.md
     html_path = args.html if args.html.is_absolute() else ROOT / args.html
-    write_outputs(data, json_path, md_path, html_path)
+    xlsx_path = args.xlsx if args.xlsx.is_absolute() else ROOT / args.xlsx
+    write_outputs(data, json_path, md_path, html_path, xlsx_path)
     print(f"Wrote {rel(json_path)}")
     print(f"Wrote {rel(md_path)}")
     print(f"Wrote {rel(html_path)}")
+    print(f"Wrote {rel(xlsx_path)}")
 
 
 if __name__ == "__main__":
