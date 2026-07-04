@@ -39,11 +39,15 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Main carry judgment must follow player investment: more equipment, more selected equipment, higher stars, and earlier board slot. Export the top 3 carry candidates per board with explicit priority (`P1`/`P2`/`P3`).
 - Card order is preserved by `slot_index`; the first card (`cards[0]`) is the duo-focused card.
 - Team rank is recomputed per match: sort teams by their best individual rank to get team rank 1-4.
+- Blue cards are duo-oriented; report their normal holder performance plus a team-rank view.
+- Card rankings are sorted by sample count first within each prefix group, and include average appearances per match.
 - Exclude card-granted heroes such as `暴龙虾饺` from lineup level and representative lineup lists.
 - Label scattered first-tier trait boards as `拼多多` unless a stable activated carry trait clearly leads the comp.
 - Split composition recommendations into `赌狗` and `高费` using the analyzer play-style rules; keep the strategy-level breakdown auditable.
 - Do not recommend 3-star 4-cost or 5-cost carries as a normal requirement; treat those as high-cost ceiling samples.
 - Merge duplicate comp rows into strategy-level recommendations with mature stages and transition stages.
+- Count cross-strategy contest pressure when strategies need the same 3-star main carry, even if their final bonds differ.
+- Treat weak lower-tier bond rows covered by a strong mature strategy as formation pressure, not standalone version traps.
 - Evaluate jiujiu only when it contributes as a final main/sub bond, specific hero boost, or cross-strategy generalist value.
 
 ## Output Expectations
@@ -57,10 +61,13 @@ Write concise Chinese conclusions. Include:
 - Card strength, with composition-specific notes when sample size allows.
 - First-card duo synergy and contribution observations based on recomputed team rank.
 - Formation difficulty and popularity with overall strength ranking.
+- Low-cost 3-star main-carry difficulty, including same-match demand pressure by hero.
+- Duo composition synergy recommendations based on recomputed team rank.
 - Strong carry heroes overview in Markdown; full equipment recommendations in Excel only.
 - Main carry star requirement (average top4 stars) and key equipment dependency notes for recommended comps.
 - Jiujiu dependency notes when a comp title bond requires `X啾啾`, including recommended wearer heroes.
 - Jiujiu strength ranking and recommended comps for each jiujiu item.
+- Jiujiu recommended comps should include observed wearer heroes when available.
 - Version traps: popular but weak heroes, comps, bonds, equipment, or cards.
 - Balance-change tracking when the user provides patch notes.
 

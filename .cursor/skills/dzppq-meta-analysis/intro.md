@@ -48,6 +48,7 @@ equipment_count*30 + selected_equipment_count*12 + stars*10 + tier*2 + max(0, 8-
 - `cluster_compositions()` groups similar boards into stage-level families.
 - `build_composition_row()` builds statistics, variants, carry requirements, jiujiu requirements, difficulty, popularity, strength rank inputs, `play_style`, and `play_style_breakdown`.
 - `merge_comp_strategies()` merges duplicate stage rows into strategy-level rows with `mature_stage`, `transition_stages`, and `strength_rank`.
+- `enrich_three_star_contest()` adds cross-strategy contest pressure when strategies need the same 3-star main carry, plus low-cost 3-star carry difficulty rows.
 - `build_composition_recommendations()` splits strategy recommendations into `赌狗` and `高费`.
 
 ## Play Style Rules
@@ -62,7 +63,8 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 ## Rendering
 
 - `render_md()` writes the full audit report. The recommendation area is split into `赌狗阵容推荐` and `高费阵容推荐`. Per-hero equipment tables are not embedded; they go to Excel.
-- `render_html()` writes a concise 1080px poster. It uses the same split recommendations, not a Markdown-to-HTML conversion.
+- `render_md()` also includes low-cost 3-star carry difficulty, blue-card team-rank view, jiujiu wearer recommendations, and duo composition synergy when enough samples exist.
+- `render_html()` writes a concise 1080px poster. It uses the same split recommendations, not a Markdown-to-HTML conversion, and keeps only compact card/jiujiu/duo highlights.
 - `render_xlsx()` writes per-hero equipment, comp carry equipment, common 3-item sets, and low-sample observations.
 - HTML should stay visual and compact: sample summary, top comps by style, card picks, jiujiu highlights, traps, and reading caveats.
 
@@ -72,10 +74,12 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 - Recommendation split: `build_composition_recommendations()` and the Markdown/HTML renderers.
 - Carry requirements: `summarize_carry_requirements()`, `summarize_comp_carry_equipment()`, and `analyze_comp_jiujiu_dependency()`.
 - Strength ranking: `overall_strength_score()` and `merge_comp_strategies()`.
+- Cross-strategy contest and low-cost 3-star difficulty: `enrich_three_star_contest()`.
 - Excel export: `render_xlsx()` and `write_outputs()`.
 - Card logic: `analyze_cards()` with prefix-type grouping via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`.
 - Jiujiu logic: `analyze_jiujiu()`.
-- Trap logic: `find_traps()`.
+- Duo composition synergy: `analyze_duo_composition_synergy()`.
+- Trap logic and mature-strategy-covered lower-tier bonds: `find_traps()`.
 - Poster layout: `render_html()` and its small HTML helper functions.
 
 ## Safe Change Notes

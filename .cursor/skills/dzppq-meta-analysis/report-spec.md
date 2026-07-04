@@ -77,6 +77,7 @@ Cluster boards into comp families:
 For each comp family, report:
 
 - Representative 7/8/9-level hero lists from best-ranked samples, plus per-variant bond attainment notes.
+- Representative samples should prefer boards that actually satisfy the title bond at that level; if none exist, mark the bond as unmet instead of implying completion.
 - Main carry and up to two alternate carries, with explicit priority ranking.
 - Main carry minimum star recommendation, average top4 stars, and three-item coverage.
 - For 4-cost and 5-cost carries, cap normal star recommendation at 2 stars. If 3-star high-cost samples dominate, mark the comp as high-cost ceiling dependent instead of recommending 3 stars.
@@ -84,6 +85,7 @@ For each comp family, report:
 - Jiujiu dependency when the title bond tier requires `X啾啾`: dependency rate, recommended jiujiu item, and recommended wearer heroes.
 - Core bond tiers and common sub-bonds.
 - Average rank, top4 rate, win rate, sample size, confidence.
+- Average number of 3-star lineup units overall and in top4 samples.
 - Mature stage and transition stages. Transition stages contribute to formation difficulty and trap analysis but should not become separate top-level recommendations when they are the same strategy.
 
 ### Play Style Split
@@ -103,6 +105,7 @@ Difficulty combines:
 
 - Unfinished pressure: similar low-star or low-equipment versions in bottom four.
 - Contest pressure: average number of similar boards in the same match.
+- Cross-strategy 3-star carry pressure: if two strategies require the same 3-star main carry, count them as contesting each other even when their final bonds differ.
 - Key-unit pressure: missing or under-starred main carry in poor results.
 - Equipment pressure: average carry equipment completeness.
 
@@ -116,15 +119,24 @@ Use labels: low, medium, high. Explain when a comp is strong but hard to complet
 
 Also publish an overall strength rank per strategy that combines post-formation performance (avg rank, top4, win rate) with formation difficulty (unfinished pressure, contest pressure, equipment completeness).
 
+Also publish low-cost 3-star main-carry difficulty:
+
+- required 3-star carry hero, tier, appearances, average same-match needers, max same-match needers.
+- match rate where multiple players need the same hero at 3 stars.
+- top strategies that require the hero.
+
 ## Card Analysis
 
 Primary card ranking:
 
 - single-card appearances, avg rank, top4 rate, win rate.
 - adjusted rank with global baseline and a small prior to reduce low-sample noise.
+- average appearances per match.
+- within each prefix group, sort primary card rankings by sample count first, then adjusted rank and outcome metrics.
 - first-card rankings use `cards[0]`.
 - group single-card and first-card rankings by card template prefix type (`彩` / `黄` / `蓝` / `白` / `其他`) and rank within each group; do not compare different prefix types on one leaderboard.
 - unprefixed disambiguated labels such as `吸吸宝pro` and `快速成型` should inherit their source prefix type for grouping; `蓝·重质也重量pro` and `蓝·拍档支援` keep their template prefix directly.
+- blue cards are duo-oriented and should additionally include a recomputed team-rank view with team average rank and team top2 rate.
 
 Secondary card views:
 
@@ -133,6 +145,7 @@ Secondary card views:
 - first-card duo synergy compares both teammates' first cards.
 - Team rank is recomputed per match: each team takes its best individual rank, then all teams are sorted to produce team rank 1-4.
 - Duo card contribution includes holder avg rank, recomputed team avg rank, lift versus team baseline, and lift versus holder rank after scaling individual rank to team-rank range.
+- Duo composition synergy compares the two teammates' final strategy labels using recomputed team rank, team top2 rate, and team win rate.
 - teammate pair/card synergy only as low-confidence observations unless sample size is strong.
 
 ## Strong Heroes And Equipment
@@ -158,6 +171,7 @@ For every observed `X啾啾`:
 - A jiujiu is effective when it is part of the final main/sub bond, significantly boosts a specific carry/frontline/key unit, or shows stable positive value across multiple strategies.
 - Rank the item by effective sample count, effective rate, adjusted avg rank, avg rank, top4 rate, and win rate.
 - Recommended comps should only come from `final_bond` or stable `generalist` evidence. `hero_boost` recommendations should name specific heroes instead of forcing a comp.
+- Recommended comp rows should include observed wearer heroes for that jiujiu item when available.
 - Keep tier-uplift data as supporting evidence only; uplift alone does not prove strength.
 
 ## Strategy-Level Traps
@@ -167,6 +181,7 @@ Version traps are evaluated after merging mature and transition stages:
 - Aggregate all stages of the same strategy and dedupe players before judging.
 - Weak transition stages are formation difficulty, not traps, when the mature stage is strong.
 - A strategy is a trap only when the full strategy remains popular and weak after considering mature plus transition results.
+- Weak lower-tier bond rows covered by a strong mature strategy, such as a low-tier learning-club board that belongs to a strong higher-tier learning-club strategy, should be reported as formation pressure rather than independent bond traps.
 
 ## Version Traps
 

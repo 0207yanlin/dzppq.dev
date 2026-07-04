@@ -175,6 +175,8 @@ def aggregate_key_stats_by_prefix(
     items: list[tuple[str, int]],
     min_apps: int,
     baseline: float,
+    *,
+    sample_first: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     rows = aggregate_key_stats(items, min_apps, baseline)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -185,9 +187,19 @@ def aggregate_key_stats_by_prefix(
     by_prefix: dict[str, list[dict[str, Any]]] = {}
     for prefix_type in CARD_PREFIX_TYPES:
         group_rows = grouped.get(prefix_type, [])
-        group_rows.sort(
-            key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"])
-        )
+        if sample_first:
+            group_rows.sort(
+                key=lambda row: (
+                    -row["appearances"],
+                    row["adjusted_avg_rank"],
+                    row["avg_rank"],
+                    -row["top4_rate"],
+                )
+            )
+        else:
+            group_rows.sort(
+                key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"])
+            )
         ranked_rows: list[dict[str, Any]] = []
         for rank, row in enumerate(group_rows, start=1):
             ranked_row = {**row, "prefix_type": prefix_type, "prefix_rank": rank}
@@ -196,6 +208,25 @@ def aggregate_key_stats_by_prefix(
         if ranked_rows:
             by_prefix[prefix_type] = ranked_rows
     return annotated, by_prefix
+
+
+def add_avg_appearances_per_match(
+    rows: list[dict[str, Any]],
+    total_matches: int,
+) -> list[dict[str, Any]]:
+    denominator = max(total_matches, 1)
+    for row in rows:
+        row["avg_appearances_per_match"] = round(row["appearances"] / denominator, 2)
+    return rows
+
+
+def add_avg_appearances_to_prefix_groups(
+    groups: dict[str, list[dict[str, Any]]],
+    total_matches: int,
+) -> dict[str, list[dict[str, Any]]]:
+    for rows in groups.values():
+        add_avg_appearances_per_match(rows, total_matches)
+    return groups
 
 
 def jiujiu_trait(equipment_name: str) -> str | None:
@@ -266,6 +297,16 @@ def classify_play_style(feature: PlayerFeature) -> str:
     if has_low_cost_three_star_main:
         return "赌狗"
     return "高费"
+
+
+def three_star_lineup_count(feature: PlayerFeature) -> int:
+    return len(
+        {
+            hero.name
+            for hero in feature.heroes
+            if is_lineup_hero(hero.name) and hero.stars >= 3
+        }
+    )
 
 
 def play_style_summary(members: list[PlayerFeature]) -> tuple[str, list[dict[str, Any]]]:
@@ -763,6 +804,10 @@ def build_composition_row(
 
     unfinished_rate = unfinished * 100.0 / len(members)
     carry_complete_rate = carry_complete * 100.0 / len(members)
+    three_star_counts = [three_star_lineup_count(member) for member in members]
+    top4_three_star_counts = [
+        three_star_lineup_count(member) for member in members if member.rank <= 4
+    ]
     difficulty_score = (
         (unfinished_rate / 100.0) * 0.5
         + min(avg_contest / 3.0, 1.0) * 0.3
@@ -842,6 +887,12 @@ def build_composition_row(
             "unfinished_bottom_rate": round(unfinished_rate, 1),
             "carry_complete_rate": round(carry_complete_rate, 1),
             "avg_same_match_contest": round(avg_contest, 2),
+            "avg_family_contest": round(avg_contest, 2),
+            "avg_three_star_units": round(avg_number(three_star_counts) or 0.0, 2),
+            "avg_top4_three_star_units": round(
+                avg_number(top4_three_star_counts) or avg_number(three_star_counts) or 0.0,
+                2,
+            ),
         },
         "popularity": {
             "label": popularity,
@@ -849,6 +900,7 @@ def build_composition_row(
             "pick_rate": round(pick_rate, 1),
             "match_share": round(match_share, 1),
             "avg_same_match_contest": round(avg_contest, 2),
+            "avg_family_contest": round(avg_contest, 2),
         },
         "confidence": confidence_label(len(members)),
         "member_player_ids": [member.player_id for member in members],
@@ -1041,6 +1093,182 @@ def merge_comp_strategies(
     return strategies
 
 
+def three_star_required_carries(row: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "hero_name": item["hero_name"],
+            "tier": item.get("tier"),
+            "share": item.get("share"),
+            "samples": item.get("samples"),
+            "three_star_rate": item.get("three_star_rate"),
+            "avg_stars_top4": item.get("avg_stars_top4"),
+        }
+        for item in row.get("carry_requirements", [])
+        if item.get("recommended_min_stars", 0) >= 3
+    ]
+
+
+def relabel_difficulty(score: float) -> str:
+    return "高" if score >= 0.58 else "中" if score >= 0.34 else "低"
+
+
+def relabel_popularity(score: float) -> str:
+    return "高" if score >= 1.5 else "中" if score >= 0.8 else "低"
+
+
+def enrich_three_star_contest(
+    comp_rows: list[dict[str, Any]],
+    features: list[PlayerFeature],
+) -> list[dict[str, Any]]:
+    player_to_strategy: dict[int, dict[str, Any]] = {}
+    for row in comp_rows:
+        required = three_star_required_carries(row)
+        row["three_star_required_carries"] = required
+        row["low_cost_three_star_required_carries"] = [
+            item for item in required if item.get("tier") is not None and item["tier"] <= 3
+        ]
+        for player_id in row.get("member_player_ids", []):
+            player_to_strategy[player_id] = row
+
+    features_by_match: dict[int, list[PlayerFeature]] = defaultdict(list)
+    for feature in features:
+        features_by_match[feature.match_id].append(feature)
+
+    hero_match_counts: dict[str, Counter[int]] = defaultdict(Counter)
+    hero_rank_stats: dict[str, RankStats] = defaultdict(RankStats)
+    hero_strategy_labels: dict[str, Counter[str]] = defaultdict(Counter)
+
+    for feature in features:
+        strategy = player_to_strategy.get(feature.player_id)
+        if not strategy:
+            continue
+        for required in strategy.get("three_star_required_carries", []):
+            hero_name = required["hero_name"]
+            hero_match_counts[hero_name][feature.match_id] += 1
+            hero_rank_stats[hero_name].add(feature.rank)
+            hero_strategy_labels[hero_name][strategy["label"]] += 1
+
+    for row in comp_rows:
+        required_names = {
+            item["hero_name"] for item in row.get("three_star_required_carries", [])
+        }
+        overlap_values: list[int] = []
+        overlap_label_counter: Counter[str] = Counter()
+        for player_id in row.get("member_player_ids", []):
+            feature = next((item for item in features if item.player_id == player_id), None)
+            if feature is None or not required_names:
+                continue
+            match_features = features_by_match.get(feature.match_id, [])
+            max_overlap = 1
+            for hero_name in required_names:
+                same_need = [
+                    other
+                    for other in match_features
+                    if (
+                        other_strategy := player_to_strategy.get(other.player_id)
+                    )
+                    and any(
+                        req["hero_name"] == hero_name
+                        for req in other_strategy.get("three_star_required_carries", [])
+                    )
+                ]
+                if len(same_need) > max_overlap:
+                    max_overlap = len(same_need)
+                for other in same_need:
+                    other_strategy = player_to_strategy.get(other.player_id)
+                    if other_strategy and other_strategy is not row:
+                        overlap_label_counter[other_strategy["label"]] += 1
+            overlap_values.append(max_overlap)
+
+        avg_overlap = round(avg_number(overlap_values) or 0.0, 2)
+        difficulty = row["difficulty"]
+        popularity = row["popularity"]
+        family_contest = difficulty.get("avg_family_contest", difficulty["avg_same_match_contest"])
+        combined_contest = max(family_contest, avg_overlap)
+        difficulty["avg_required_carry_contest"] = avg_overlap
+        difficulty["avg_same_match_contest"] = round(combined_contest, 2)
+        difficulty["contest_basis"] = "3星主C重叠" if avg_overlap > family_contest else "阵容相似"
+        difficulty["overlap_strategies"] = [
+            {"label": label, "samples": count}
+            for label, count in overlap_label_counter.most_common(5)
+        ]
+        difficulty_score = (
+            (difficulty["unfinished_bottom_rate"] / 100.0) * 0.5
+            + min(combined_contest / 3.0, 1.0) * 0.3
+            + (1.0 - difficulty["carry_complete_rate"] / 100.0) * 0.2
+        )
+        difficulty["score"] = round(difficulty_score, 3)
+        difficulty["label"] = relabel_difficulty(difficulty_score)
+        popularity["avg_required_carry_contest"] = avg_overlap
+        popularity["avg_same_match_contest"] = round(combined_contest, 2)
+        popularity["contest_basis"] = difficulty["contest_basis"]
+        popularity_score = (
+            popularity["pick_rate"] / 20.0
+            + combined_contest / 3.0
+            + popularity["match_share"] / 80.0
+        )
+        popularity["score"] = round(popularity_score, 3)
+        popularity["label"] = relabel_popularity(popularity_score)
+        row["overall_strength_score"] = overall_strength_score(row)
+        row["recommendation_score"] = composition_recommendation_score(row)
+
+    rows: list[dict[str, Any]] = []
+    for hero_name, match_counts in hero_match_counts.items():
+        stat = hero_rank_stats[hero_name]
+        if not match_counts:
+            continue
+        avg_contest = sum(match_counts.values()) / len(match_counts)
+        multi_match_rate = (
+            sum(1 for count in match_counts.values() if count >= 2)
+            * 100.0
+            / len(match_counts)
+        )
+        top_strategy_labels = [
+            {"label": label, "samples": count}
+            for label, count in hero_strategy_labels[hero_name].most_common(4)
+        ]
+        tier = None
+        for row in comp_rows:
+            for item in row.get("three_star_required_carries", []):
+                if item["hero_name"] == hero_name:
+                    tier = item.get("tier")
+                    break
+            if tier is not None:
+                break
+        rows.append(
+            {
+                "hero_name": hero_name,
+                "tier": tier,
+                **stat.to_dict(),
+                "match_appearances": len(match_counts),
+                "avg_same_match_needers": round(avg_contest, 2),
+                "max_same_match_needers": max(match_counts.values()),
+                "multi_needer_match_rate": round(multi_match_rate, 1),
+                "top_strategies": top_strategy_labels,
+                "is_low_cost": tier is not None and tier <= 3,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            not row["is_low_cost"],
+            -row["avg_same_match_needers"],
+            -row["appearances"],
+            row["avg_rank"],
+        )
+    )
+    for rank, row in enumerate(sorted(comp_rows, key=lambda item: item["overall_strength_score"]), start=1):
+        row["strength_rank"] = rank
+    comp_rows.sort(
+        key=lambda row: (
+            row["overall_strength_score"],
+            row["recommendation_score"],
+            -row["aggregate_stats"]["appearances"],
+            row["aggregate_stats"]["avg_rank"],
+        )
+    )
+    return rows
+
+
 def build_composition_recommendations(
     comp_rows: list[dict[str, Any]],
     limit: int = 8,
@@ -1182,8 +1410,21 @@ def build_level_variants(
             if len(unique_heroes_by_slot(member)) == target
         ]
         if exact:
-            best = sorted(exact, key=lambda item: (item.rank, -len(item.hero_set)))[0]
-            bond_status = compute_variant_bond_status(best, main_bond)
+            candidates = [
+                (member, compute_variant_bond_status(member, main_bond))
+                for member in exact
+            ]
+            best, bond_status = sorted(
+                candidates,
+                key=lambda item: (
+                    not (
+                        item[1] is None
+                        or item[1].get("meets_title_bond", False)
+                    ),
+                    item[0].rank,
+                    -len(item[0].hero_set),
+                ),
+            )[0]
             variants[str(target)] = {
                 "source": "sample",
                 "confidence": confidence_label(len(exact)),
@@ -1404,6 +1645,8 @@ def analyze_cards(
 ) -> dict[str, Any]:
     single_items: list[tuple[str, int]] = []
     first_card_items: list[tuple[str, int]] = []
+    blue_team_rank_items: list[tuple[str, int]] = []
+    blue_team_top2: Counter[str] = Counter()
     pair_items: list[tuple[str, int]] = []
     triple_items: list[tuple[str, int]] = []
     teammate_pair_items: list[tuple[str, int]] = []
@@ -1425,11 +1668,16 @@ def analyze_cards(
             "rank_gap_sum": 0.0,
         }
     )
+    total_matches = len({feature.match_id for feature in features}) or 1
 
     for feature in features:
         cards = sorted(set(feature.cards))
         for card in cards:
             single_items.append((card, feature.rank))
+            if card_prefix_type(card) == "蓝":
+                blue_team_rank_items.append((card, team_rank_value(feature)))
+                if team_rank_value(feature) <= 2:
+                    blue_team_top2[card] += 1
             if feature.family_id:
                 comp_card_items[feature.family_id].append((card, feature.rank))
         if (card := first_card(feature)) is not None:
@@ -1477,6 +1725,7 @@ def analyze_cards(
     for family_id, items in comp_card_items.items():
         rows = aggregate_key_stats(items, max(4, min_apps // 3), baseline)[:8]
         if rows:
+            add_avg_appearances_per_match(rows, total_matches)
             by_comp.append(
                 {
                     "family_id": family_id,
@@ -1513,17 +1762,42 @@ def analyze_cards(
     )
 
     single_cards, single_cards_by_prefix = aggregate_key_stats_by_prefix(
-        single_items, min_apps, baseline
+        single_items, min_apps, baseline, sample_first=True
     )
     first_card_rankings, first_card_rankings_by_prefix = aggregate_key_stats_by_prefix(
-        first_card_items, max(6, min_apps // 2), baseline
+        first_card_items, max(6, min_apps // 2), baseline, sample_first=True
     )
+    blue_cards_team_rank, blue_cards_team_rank_by_prefix = aggregate_key_stats_by_prefix(
+        blue_team_rank_items,
+        max(6, min_apps // 2),
+        team_baseline,
+        sample_first=True,
+    )
+    add_avg_appearances_per_match(single_cards, total_matches)
+    add_avg_appearances_to_prefix_groups(single_cards_by_prefix, total_matches)
+    add_avg_appearances_per_match(first_card_rankings, total_matches)
+    add_avg_appearances_to_prefix_groups(first_card_rankings_by_prefix, total_matches)
+    add_avg_appearances_per_match(blue_cards_team_rank, total_matches)
+    add_avg_appearances_to_prefix_groups(blue_cards_team_rank_by_prefix, total_matches)
+    for row in blue_cards_team_rank:
+        row["team_top2_rate"] = round(
+            blue_team_top2[row["key"]] * 100.0 / max(row["appearances"], 1),
+            1,
+        )
+    for rows in blue_cards_team_rank_by_prefix.values():
+        for row in rows:
+            row["team_top2_rate"] = round(
+                blue_team_top2[row["key"]] * 100.0 / max(row["appearances"], 1),
+                1,
+            )
 
     return {
         "single_cards": single_cards,
         "single_cards_by_prefix": single_cards_by_prefix,
         "first_card_rankings": first_card_rankings,
         "first_card_rankings_by_prefix": first_card_rankings_by_prefix,
+        "blue_cards_team_rank": blue_cards_team_rank,
+        "blue_cards_team_rank_by_prefix": blue_cards_team_rank_by_prefix,
         "card_pairs_observation": aggregate_key_stats(pair_items, max(6, min_apps // 2), baseline)[:20],
         "card_triples_observation": aggregate_key_stats(triple_items, max(5, min_apps // 2), baseline)[:20],
         "teammate_card_pairs_observation": aggregate_key_stats(
@@ -1681,6 +1955,7 @@ def analyze_jiujiu(
     reason_counts: dict[str, Counter[str]] = defaultdict(Counter)
     player_to_comps: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
     comp_item_stats: dict[tuple[str, str], RankStats] = defaultdict(RankStats)
+    comp_item_wearers: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     hero_item_stats: dict[tuple[str, str], RankStats] = defaultdict(RankStats)
     item_strategy_seen: dict[str, set[str]] = defaultdict(set)
 
@@ -1711,6 +1986,7 @@ def analyze_jiujiu(
                         for comp in comp_values:
                             if jiujiu_matches_strategy_bond(trait, comp):
                                 comp_item_stats[(item_name, comp["label"])].add(feature.rank)
+                                comp_item_wearers[(item_name, comp["label"])][hero.name] += 1
                     if "hero_boost" in reasons:
                         hero_item_stats[(item_name, hero.name)].add(feature.rank)
                 else:
@@ -1745,6 +2021,16 @@ def analyze_jiujiu(
                     "family_label": comp_label,
                     **comp_stat.to_dict(baseline_rank=baseline, prior=6),
                     "share": round(comp_stat.appearances * 100.0 / stat.appearances, 1),
+                    "recommended_wearers": [
+                        {
+                            "hero_name": hero_name,
+                            "appearances": count,
+                            "share": round(count * 100.0 / comp_stat.appearances, 1),
+                        }
+                        for hero_name, count in comp_item_wearers[
+                            (comp_item, comp_label)
+                        ].most_common(3)
+                    ],
                 }
             )
         comps.sort(key=lambda row: (-row["appearances"], row["adjusted_avg_rank"], -row["top4_rate"]))
@@ -1812,6 +2098,89 @@ def classify_jiujiu_sample(
     return reasons
 
 
+def analyze_duo_composition_synergy(
+    features: list[PlayerFeature],
+    comp_rows: list[dict[str, Any]],
+    team_baseline: float,
+    min_apps: int = 5,
+) -> list[dict[str, Any]]:
+    player_to_comp: dict[int, dict[str, Any]] = {}
+    for comp in comp_rows:
+        for player_id in comp.get("member_player_ids", []):
+            player_to_comp[player_id] = comp
+
+    by_match_rank = {
+        (feature.match_id, feature.rank): feature
+        for feature in features
+    }
+    pair_stats: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {
+            "appearances": 0,
+            "team_rank_sum": 0.0,
+            "team_top2": 0,
+            "team_wins": 0,
+            "individual_rank_sum": 0.0,
+            "strategy_labels": None,
+        }
+    )
+    seen_pairs: set[tuple[int, int]] = set()
+    for feature in features:
+        if feature.partner_player is None:
+            continue
+        partner = by_match_rank.get((feature.match_id, int(feature.partner_player)))
+        if partner is None:
+            continue
+        pair_key = tuple(sorted((feature.player_id, partner.player_id)))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        left = player_to_comp.get(feature.player_id)
+        right = player_to_comp.get(partner.player_id)
+        if not left or not right:
+            continue
+        labels = tuple(sorted((left["label"], right["label"])))
+        team_rank = min(team_rank_value(feature), team_rank_value(partner))
+        row = pair_stats[labels]
+        row["appearances"] += 1
+        row["team_rank_sum"] += team_rank
+        row["individual_rank_sum"] += (feature.rank + partner.rank) / 2.0
+        row["strategy_labels"] = labels
+        if team_rank <= 2:
+            row["team_top2"] += 1
+        if team_rank == 1:
+            row["team_wins"] += 1
+
+    rows: list[dict[str, Any]] = []
+    for labels, row in pair_stats.items():
+        n = row["appearances"]
+        if n < min_apps:
+            continue
+        team_avg = row["team_rank_sum"] / n
+        holder_avg = row["individual_rank_sum"] / n
+        rows.append(
+            {
+                "strategy_a": labels[0],
+                "strategy_b": labels[1],
+                "key": " + ".join(labels),
+                "appearances": n,
+                "team_avg_rank": round(team_avg, 2),
+                "team_top2_rate": round(row["team_top2"] * 100.0 / n, 1),
+                "team_win_rate": round(row["team_wins"] * 100.0 / n, 1),
+                "team_lift_vs_baseline": round(team_baseline - team_avg, 2),
+                "holder_avg_rank": round(holder_avg, 2),
+                "confidence": confidence_label(n),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -row["appearances"],
+            row["team_avg_rank"],
+            -row["team_top2_rate"],
+        )
+    )
+    return rows[:20]
+
+
 def selected_priority_label(selected_rate: float, avg_rank: float, baseline: float) -> str:
     if selected_rate >= 30 and avg_rank < baseline:
         return "高"
@@ -1861,14 +2230,18 @@ def find_traps(
             return None
         return parse_trait_tier(key)[0]
 
-    strong_traits = {
-        trait
-        for row in comp_rows
-        if (trait := comp_trait(row))
-        and row["stats"]["appearances"] >= 20
-        and row["stats"]["top4_rate"] >= 60
-        and row["stats"]["avg_rank"] <= baseline
-    }
+    strong_trait_tiers: dict[str, int] = {}
+    for row in comp_rows:
+        trait = comp_trait(row)
+        if (
+            trait
+            and row["stats"]["appearances"] >= 20
+            and row["stats"]["top4_rate"] >= 60
+            and row["stats"]["avg_rank"] <= baseline
+        ):
+            _, tier = parse_trait_tier(row["main_bond"])
+            strong_trait_tiers[trait] = max(strong_trait_tiers.get(trait, 0), tier)
+    strong_traits = set(strong_trait_tiers)
 
     comp_traps = [
         row
@@ -1881,11 +2254,32 @@ def find_traps(
         row["trap_reason"] = "策略整体表现偏弱，且没有同羁绊强势大成形态覆盖"
     comp_traps.sort(key=lambda row: (-row["popularity"]["pick_rate"], -row["stats"]["avg_rank"]))
 
+    bond_traps: list[dict[str, Any]] = []
+    covered_bond_pressure: list[dict[str, Any]] = []
+    for row in bond_rows:
+        if row["appearances"] < 10 or not weak(row):
+            continue
+        key = row.get("key", "")
+        if "-" in key:
+            trait, tier = parse_trait_tier(key)
+            mature_tier = strong_trait_tiers.get(trait)
+            if mature_tier and tier < mature_tier:
+                covered_bond_pressure.append(
+                    {
+                        **row,
+                        "covered_by": f"{trait}-{mature_tier}",
+                        "trap_reason": f"更像{trait}-{mature_tier}的未成型阶段，计入成型压力而非独立陷阱",
+                    }
+                )
+                continue
+        bond_traps.append(row)
+
     return {
         "compositions": comp_traps[:10],
         "heroes": [row for row in hero_rows if row["appearances"] >= 10 and weak(row)][:10],
         "cards": find_card_traps(cards_by_prefix, baseline),
-        "bonds": [row for row in bond_rows if row["appearances"] >= 10 and weak(row)][:10],
+        "bonds": bond_traps[:10],
+        "formation_pressure_bonds": covered_bond_pressure[:10],
         "equipment": [row for row in equipment_rows if row["appearances"] >= 10 and weak(row)][:10],
     }
 
@@ -1924,9 +2318,16 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
         )
         stage_rows = cluster_compositions(features, args.min_comp_apps)
         comp_rows = merge_comp_strategies(stage_rows, features)
+        low_cost_carry_difficulty = enrich_three_star_contest(comp_rows, features)
         hero_equipment = analyze_heroes_and_equipment(features, args.min_entity_apps, baseline)
         cards = analyze_cards(features, comp_rows, args.min_card_apps, baseline, team_baseline)
         jiujiu_analysis = analyze_jiujiu(features, comp_rows, baseline)
+        duo_compositions = analyze_duo_composition_synergy(
+            features,
+            comp_rows,
+            team_baseline,
+            min_apps=max(4, args.min_comp_apps // 2),
+        )
         observed_names = {
             hero.name for feature in features for hero in feature.heroes
         } | {
@@ -1981,6 +2382,8 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 "compositions": comp_rows,
                 "composition_recommendations": build_composition_recommendations(comp_rows),
                 "composition_stages": stage_rows,
+                "low_cost_carry_three_star_difficulty": low_cost_carry_difficulty,
+                "duo_composition_synergy": duo_compositions,
                 "cards": cards,
                 "heroes_and_equipment": hero_equipment,
                 "jiujiu": jiujiu_analysis,
@@ -2048,6 +2451,14 @@ def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
     lines.append(
         f"- 表现：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，吃鸡 {render_pct(stats['win_rate'])}。"
     )
+    difficulty = comp.get("difficulty", {})
+    if difficulty:
+        lines.append(
+            f"- 三星压力：阵容平均{difficulty.get('avg_three_star_units', 0):.2f}个三星棋子，"
+            f"前四样本平均{difficulty.get('avg_top4_three_star_units', 0):.2f}个；"
+            f"同行数{difficulty.get('avg_same_match_contest', 0):.2f}"
+            f"（{difficulty.get('contest_basis', '阵容相似')}）。"
+        )
     carries = "、".join(
         f"P{item.get('carry_rank', idx)} {item['hero_name']}({render_pct(item['share'])})"
         for idx, item in enumerate(comp["main_carries"], start=1)
@@ -2229,25 +2640,61 @@ def render_md(data: dict[str, Any]) -> str:
             row.get("overall_strength_score", 99),
         ),
     )
-    lines.append("| 强度排名 | 阵容 | 类型 | 难度 | 热门 | 后四未成型率 | 同行数 | 出场率 |")
-    lines.append("| ---: | --- | --- | --- | --- | ---: | ---: | ---: |")
+    lines.append("| 强度排名 | 阵容 | 类型 | 难度 | 热门 | 平均三星 | 后四未成型率 | 同行数 | 同行口径 | 出场率 |")
+    lines.append("| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: |")
     for comp in strength_sorted[:12]:
         difficulty = comp["difficulty"]
         popularity = comp["popularity"]
         lines.append(
             f"| {comp.get('strength_rank', '—')} | {comp['label']} | {comp.get('play_style', '高费')} | "
             f"{difficulty['label']} | {popularity['label']} | "
+            f"{difficulty.get('avg_three_star_units', 0):.2f} | "
             f"{render_pct(difficulty['unfinished_bottom_rate'])} | "
-            f"{difficulty['avg_same_match_contest']:.2f} | {render_pct(popularity['pick_rate'])} |"
+            f"{difficulty['avg_same_match_contest']:.2f} | "
+            f"{difficulty.get('contest_basis', '阵容相似')} | {render_pct(popularity['pick_rate'])} |"
         )
     lines.append("")
+
+    low_cost_difficulty = data["rankings"].get("low_cost_carry_three_star_difficulty", [])
+    if low_cost_difficulty:
+        lines.append("### 低费主C三星难度")
+        lines.append("")
+        lines.append("同场多家阵容需要同一个低费3星主C时，即使阵容路线不同，也计入同行压力。")
+        lines.append("")
+        lines.append("| 棋子 | 费用 | 平均同场需求 | 最高同场需求 | 多家需求对局率 | 平均名次 | 样本 | 主要阵容 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+        for row in [item for item in low_cost_difficulty if item.get("is_low_cost")][:12]:
+            strategies = "；".join(
+                f"{item['label']}({item['samples']})" for item in row.get("top_strategies", [])[:3]
+            )
+            lines.append(
+                f"| {row['hero_name']} | {row.get('tier') or '—'} | "
+                f"{row['avg_same_match_needers']:.2f} | {row['max_same_match_needers']} | "
+                f"{render_pct(row['multi_needer_match_rate'])} | {row['avg_rank']:.2f} | "
+                f"{row['appearances']} | {strategies or '样本不足'} |"
+            )
+        lines.append("")
+        lines.append("### 主C三星需求热门程度")
+        lines.append("")
+        lines.append("| 棋子 | 费用 | 平均同场需求 | 最高同场需求 | 多家需求对局率 | 需要它三星的阵容 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for row in low_cost_difficulty[:12]:
+            strategies = "；".join(
+                f"{item['label']}({item['samples']})" for item in row.get("top_strategies", [])[:3]
+            )
+            lines.append(
+                f"| {row['hero_name']} | {row.get('tier') or '—'} | "
+                f"{row['avg_same_match_needers']:.2f} | {row['max_same_match_needers']} | "
+                f"{render_pct(row['multi_needer_match_rate'])} | {strategies or '样本不足'} |"
+            )
+        lines.append("")
 
     lines.append("## 卡牌强度分析")
     lines.append("")
     lines.append(
         "卡牌顺序按 `slot_index` 统计，第一张卡牌视为双人配合重点；队伍排名按每局队伍最高个人名次重新排序为 1-4。"
     )
-    lines.append("单卡与第一卡强度按模板前缀类型（彩/黄/蓝/白/其他）分组，并在各组内独立排名。")
+    lines.append("单卡与第一卡强度按模板前缀类型（彩/黄/蓝/白/其他）分组，并在各组内优先按样本数排序。")
     lines.append("")
     cards_by_prefix = data["rankings"]["cards"].get("single_cards_by_prefix", {})
     if cards_by_prefix:
@@ -2257,22 +2704,24 @@ def render_md(data: dict[str, Any]) -> str:
                 continue
             lines.append(f"### {prefix_type}类单卡")
             lines.append("")
-            lines.append("| 组内排名 | 卡牌 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 | 样本 |")
-            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+            lines.append("| 组内排名 | 卡牌 | 样本 | 每局平均 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 |")
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
             for row in prefix_rows[:12]:
                 lines.append(
-                    f"| {row['prefix_rank']} | {row['key']} | {row['adjusted_avg_rank']:.2f} | "
+                    f"| {row['prefix_rank']} | {row['key']} | {row['appearances']} | "
+                    f"{row.get('avg_appearances_per_match', 0):.2f} | {row['adjusted_avg_rank']:.2f} | "
                     f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} | "
-                    f"{render_pct(row['win_rate'])} | {row['appearances']} |"
+                    f"{render_pct(row['win_rate'])} |"
                 )
             lines.append("")
     else:
-        lines.append("| 卡牌 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 | 样本 |")
-        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        lines.append("| 卡牌 | 样本 | 每局平均 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
         for row in cards[:20]:
             lines.append(
-                f"| {row['key']} | {row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | "
-                f"{render_pct(row['top4_rate'])} | {render_pct(row['win_rate'])} | {row['appearances']} |"
+                f"| {row['key']} | {row['appearances']} | {row.get('avg_appearances_per_match', 0):.2f} | "
+                f"{row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | "
+                f"{render_pct(row['top4_rate'])} | {render_pct(row['win_rate'])} |"
             )
         lines.append("")
     first_cards = data["rankings"]["cards"]["first_card_rankings"]
@@ -2286,23 +2735,38 @@ def render_md(data: dict[str, Any]) -> str:
                 continue
             lines.append(f"#### {prefix_type}类第一卡")
             lines.append("")
-            lines.append("| 组内排名 | 第一卡 | 修正名次 | 平均名次 | 前四率 | 样本 |")
-            lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
+            lines.append("| 组内排名 | 第一卡 | 样本 | 每局平均 | 修正名次 | 平均名次 | 前四率 |")
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
             for row in prefix_rows[:8]:
                 lines.append(
-                    f"| {row['prefix_rank']} | {row['key']} | {row['adjusted_avg_rank']:.2f} | "
-                    f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} | {row['appearances']} |"
+                    f"| {row['prefix_rank']} | {row['key']} | {row['appearances']} | "
+                    f"{row.get('avg_appearances_per_match', 0):.2f} | {row['adjusted_avg_rank']:.2f} | "
+                    f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} |"
                 )
             lines.append("")
     elif first_cards:
         lines.append("### 第一张卡牌强度")
         lines.append("")
-        lines.append("| 第一卡 | 修正名次 | 平均名次 | 前四率 | 样本 |")
-        lines.append("| --- | ---: | ---: | ---: | ---: |")
+        lines.append("| 第一卡 | 样本 | 每局平均 | 修正名次 | 平均名次 | 前四率 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
         for row in first_cards[:12]:
             lines.append(
-                f"| {row['key']} | {row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | "
-                f"{render_pct(row['top4_rate'])} | {row['appearances']} |"
+                f"| {row['key']} | {row['appearances']} | {row.get('avg_appearances_per_match', 0):.2f} | "
+                f"{row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} |"
+            )
+        lines.append("")
+    blue_team_cards = data["rankings"]["cards"].get("blue_cards_team_rank", [])
+    if blue_team_cards:
+        lines.append("### 蓝卡队伍排名视角")
+        lines.append("")
+        lines.append("蓝卡按双人卡牌处理，额外使用队伍排名评估；队伍排名按每局队伍最高个人名次重新排序。")
+        lines.append("")
+        lines.append("| 蓝卡 | 样本 | 每局平均 | 修正队伍名次 | 队伍名次 | 队伍前二率 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        for row in blue_team_cards[:12]:
+            lines.append(
+                f"| {row['key']} | {row['appearances']} | {row.get('avg_appearances_per_match', 0):.2f} | "
+                f"{row['adjusted_avg_rank']:.2f} | {row['avg_rank']:.2f} | {render_pct(row.get('team_top2_rate', 0))} |"
             )
         lines.append("")
     first_duos = data["rankings"]["cards"]["first_card_duo_synergy"]
@@ -2334,7 +2798,7 @@ def render_md(data: dict[str, Any]) -> str:
         lines.append("")
         for row in comp_cards[:5]:
             picks = "、".join(
-                f"{card['key']}({card['adjusted_avg_rank']:.2f}, n={card['appearances']})"
+                f"{card['key']}({card['adjusted_avg_rank']:.2f}, n={card['appearances']}, 每局{card.get('avg_appearances_per_match', 0):.2f})"
                 for card in row["cards"][:5]
             )
             lines.append(f"- {row['family_label']}：{picks}")
@@ -2348,6 +2812,22 @@ def render_md(data: dict[str, Any]) -> str:
         for row in teammate_cards[:10]:
             lines.append(
                 f"- {row['key']}：修正 {row['adjusted_avg_rank']:.2f}，top4 {render_pct(row['top4_rate'])}，n={row['appearances']}"
+            )
+        lines.append("")
+
+    duo_comps = data["rankings"].get("duo_composition_synergy", [])
+    if duo_comps:
+        lines.append("## 双人阵容配合推荐")
+        lines.append("")
+        lines.append("基于同队两家的最终策略组合与重算队伍排名，仅作双排分工参考。")
+        lines.append("")
+        lines.append("| 阵容组合 | 队伍名次 | 相对基线提升 | 队伍前二率 | 队伍吃鸡率 | 样本 | 置信度 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | --- |")
+        for row in duo_comps[:12]:
+            lines.append(
+                f"| {row['strategy_a']} + {row['strategy_b']} | {row['team_avg_rank']:.2f} | "
+                f"{row['team_lift_vs_baseline']:.2f} | {render_pct(row['team_top2_rate'])} | "
+                f"{render_pct(row['team_win_rate'])} | {row['appearances']} | {row['confidence']} |"
             )
         lines.append("")
 
@@ -2409,11 +2889,13 @@ def render_md(data: dict[str, Any]) -> str:
         lines.append("")
         lines.append("### 啾啾强度排名")
         lines.append("")
-        lines.append("| 啾啾 | 有效样本 | 有效率 | 有效修正 | 前四率 | 推荐阵容/棋子 |")
+        lines.append("| 啾啾 | 有效样本 | 有效率 | 有效修正 | 前四率 | 推荐阵容/穿戴棋子 |")
         lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
         for row in rankings[:16]:
             comps = "；".join(
-                f"{comp['family_label']}({comp['appearances']})"
+                f"{comp['family_label']}→"
+                f"{'、'.join(wearer['hero_name'] for wearer in comp.get('recommended_wearers', [])[:2]) or '待观察'}"
+                f"({comp['appearances']})"
                 for comp in row["recommended_comps"][:2]
             )
             heroes = "；".join(
@@ -2455,6 +2937,16 @@ def render_md(data: dict[str, Any]) -> str:
             lines.append(
                 f"- {prefix_note}{name}：avg {stats['avg_rank']:.2f}，top4 {render_pct(stats['top4_rate'])}，"
                 f"n={stats['appearances']}{reason_note}"
+            )
+        lines.append("")
+    pressure_bonds = traps.get("formation_pressure_bonds", [])
+    if pressure_bonds:
+        lines.append("### 未成型压力（并入成熟阵容）")
+        lines.append("")
+        for row in pressure_bonds[:8]:
+            lines.append(
+                f"- {row['key']}：avg {row['avg_rank']:.2f}，top4 {render_pct(row['top4_rate'])}，"
+                f"n={row['appearances']}，{row.get('trap_reason', '计入成型难度')}"
             )
         lines.append("")
 
@@ -2512,6 +3004,14 @@ def html_comp_card(comp: dict[str, Any]) -> str:
         + "、".join(item["hero_name"] for item in req.get("recommended_wearers", [])[:2])
         for req in comp.get("jiujiu_requirements", [])
     )
+    difficulty = comp.get("difficulty", {})
+    star_pressure = (
+        f"三星均{difficulty.get('avg_three_star_units', 0):.2f} / "
+        f"同行{difficulty.get('avg_same_match_contest', 0):.2f}"
+        f"({difficulty.get('contest_basis', '阵容相似')})"
+        if difficulty
+        else "样本不足"
+    )
     bond_note = variant.get("bond_note", "")
     breakdown = " · ".join(
         f"{row['play_style']}{render_pct(row['share'])}"
@@ -2530,6 +3030,7 @@ def html_comp_card(comp: dict[str, Any]) -> str:
       </div>
       <p><strong>主C：</strong>{esc(carry_text or '样本不足')}</p>
       <p><strong>成型：</strong>{esc(req_text or '样本不足')}</p>
+      <p><strong>压力：</strong>{esc(star_pressure)}</p>
       <p><strong>路线：</strong>{esc(unique_route_bonds(comp))}</p>
       <p><strong>羁绊：</strong>{esc(bond_note or '—')}</p>
       <p><strong>啾啾：</strong>{esc(jiujiu_text or '无明确依赖')}</p>
@@ -2568,7 +3069,7 @@ def html_prefix_card_sections(cards_by_prefix: dict[str, list[dict[str, Any]]], 
         if not rows:
             continue
         items = "\n".join(
-            f"<li><b>{esc(row['key'])}</b><span>#{row['prefix_rank']} / 修正 {row['adjusted_avg_rank']:.2f}</span></li>"
+            f"<li><b>{esc(row['key'])}</b><span>n={row['appearances']} / 每局 {row.get('avg_appearances_per_match', 0):.2f}</span></li>"
             for row in rows
         )
         sections.append(f"<div><h4>{esc(prefix_type)}类</h4><ul>{items}</ul></div>")
@@ -2580,6 +3081,7 @@ def render_html(data: dict[str, Any]) -> str:
     recommendations = data["rankings"].get("composition_recommendations", {})
     cards = data["rankings"]["cards"]
     jiujiu_rows = data["rankings"].get("jiujiu", {}).get("jiujiu_rankings", [])[:5]
+    duo_comp_rows = data["rankings"].get("duo_composition_synergy", [])[:4]
     traps = data["rankings"]["traps"]
     generated = esc(data["generated_at"].split("T")[0])
 
@@ -2602,8 +3104,16 @@ def render_html(data: dict[str, Any]) -> str:
     top_cards = html_prefix_card_sections(cards.get("single_cards_by_prefix", {}))
     duo_cards = html_list_items(cards.get("duo_card_contribution", [])[:4])
     jiujiu_html = "\n".join(
-        f"<li><b>{esc(row['equipment_name'])}</b><span>有效 {row['effective_appearances']} / {render_pct(row['effective_rate'])}</span></li>"
+        f"<li><b>{esc(row['equipment_name'])}</b><span>"
+        f"{esc((row.get('recommended_comps') or [{}])[0].get('family_label', '待观察'))}"
+        f"→{esc('、'.join(item['hero_name'] for item in (row.get('recommended_comps') or [{}])[0].get('recommended_wearers', [])[:2]) or '待观察')}"
+        f"</span></li>"
         for row in jiujiu_rows
+    ) or "<li>样本不足</li>"
+    duo_comp_html = "\n".join(
+        f"<li><b>{esc(row['strategy_a'])} + {esc(row['strategy_b'])}</b>"
+        f"<span>队伍 {row['team_avg_rank']:.2f} / n={row['appearances']}</span></li>"
+        for row in duo_comp_rows
     ) or "<li>样本不足</li>"
     trap_html = "".join(
         html_trap_group(label, traps.get(key, []))
@@ -2710,6 +3220,8 @@ def render_html(data: dict[str, Any]) -> str:
     <div class="panel">
       <h3>读法提醒</h3>
       <p>赌狗看低费主C与三星信号，高费看8级以上无低费三星的大成样本；低样本高胜只作观察。</p>
+      <h4>双人阵容配合</h4>
+      <ul>{duo_comp_html}</ul>
     </div>
   </section>
   <footer>完整数据见 latest_meta_analysis_report.md / latest_meta_analysis.json / latest_meta_analysis_equipment.xlsx</footer>
