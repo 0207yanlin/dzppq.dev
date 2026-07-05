@@ -20,19 +20,64 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.card_rules import split_card_prefix  # noqa: E402
+from src.card_rules import normalize_card_label, resolve_card_label, split_card_prefix  # noqa: E402
 
 DEFAULT_JSON = ROOT / "data" / "latest_meta_analysis.json"
 DEFAULT_MD = ROOT / "data" / "latest_meta_analysis_report.md"
 DEFAULT_HTML = ROOT / "data" / "latest_meta_analysis_report.html"
 DEFAULT_XLSX = ROOT / "data" / "latest_meta_analysis_equipment.xlsx"
+CARD_HTML_SUFFIXES = {
+    "彩": "cai",
+    "黄": "yellow",
+    "蓝": "blue",
+    "白": "white",
+}
+DEFAULT_CARD_HTML_PATHS = {
+    prefix: ROOT / "data" / f"latest_meta_analysis_cards_{suffix}.html"
+    for prefix, suffix in CARD_HTML_SUFFIXES.items()
+}
+DEFAULT_DUO_HTML = ROOT / "data" / "latest_meta_analysis_duo_compositions.html"
+DEFAULT_LOW_COST_HTML = ROOT / "data" / "latest_meta_analysis_low_cost_carries.html"
+DEFAULT_COMP_RECOMMENDATIONS_HTML = ROOT / "data" / "latest_meta_analysis_compositions.html"
+DEFAULT_JIUJIU_COMPS_HTML = ROOT / "data" / "latest_meta_analysis_jiujiu_comps.html"
+DEFAULT_JIUJIU_WEARERS_HTML = ROOT / "data" / "latest_meta_analysis_jiujiu_wearers.html"
+DEFAULT_EQUIPMENT_HTML = ROOT / "data" / "latest_meta_analysis_equipment.html"
+DEFAULT_TRAP_COMPOSITIONS_HTML = ROOT / "data" / "latest_meta_analysis_trap_compositions.html"
+CARD_TEMPLATE_DIR = ROOT / "assets" / "templates" / "cards"
+MERGED_TEMPLATE_EXPANSIONS: dict[str, list[str]] = {
+    "黄·吸吸宝pro快速成型": ["黄·快速成型", "黄·吸吸宝pro"],
+    "蓝·重质拍档支援": ["蓝·拍档支援", "蓝·重质也重量pro"],
+}
+LEGACY_CARD_TEMPLATE_NAMES = frozenset(
+    {
+        "法力专注",
+        "蓝·开攒",
+        "蓝·大亨",
+        "蓝·一起刷刷刷",
+        "蓝·天降啾啾pro",
+    }
+)
 
 CARD_GRANTED_HEROES = {"暴龙虾饺"}
 PLAY_STYLES = ("赌狗", "高费")
 CARD_PREFIX_TYPES = ("彩", "黄", "蓝", "白", "其他")
-UNPREFIXED_CARD_TYPE_MAP = {
-    "吸吸宝pro": "黄",
-    "快速成型": "黄",
+CARD_MERGE_NOTES: dict[str, str] = {
+    "蓝": (
+        "以下卡牌因图标完全相同做了合并处理："
+        "福袋，有钱同享 -> 福袋有钱；"
+        "最佳拍档，最强支援 -> 拍档支援；"
+        "最后的波纹，利己主义 -> 波纹利己；"
+        "开攒，大亨 -> 开攒大亨；"
+        "天降啾啾pro，一起刷刷刷 -> 一起刷刷刷+天降啾啾pro。"
+    ),
+    "彩": (
+        "以下卡牌因图标完全相同做了合并处理："
+        "法师礼包，战士礼包，射手礼包 -> 法师战士射手礼包。"
+    ),
+    "黄": (
+        "以下卡牌因图标完全相同做了合并处理："
+        "大力，巫术，守护 -> 大力巫术守护。"
+    ),
 }
 
 HERO_ALIASES = {
@@ -155,7 +200,40 @@ def card_prefix_type(card_name: str) -> str:
     prefix, _ = split_card_prefix(card_name)
     if prefix:
         return prefix
-    return UNPREFIXED_CARD_TYPE_MAP.get(card_name, "其他")
+    return "其他"
+
+
+def load_report_card_catalog() -> dict[str, list[str]]:
+    by_prefix: dict[str, set[str]] = {
+        prefix: set() for prefix in CARD_PREFIX_TYPES if prefix != "其他"
+    }
+    for path in sorted(CARD_TEMPLATE_DIR.glob("*.jpg")):
+        if path.name.startswith("player"):
+            continue
+        raw_name = path.stem
+        if raw_name in LEGACY_CARD_TEMPLATE_NAMES:
+            continue
+        canonical = normalize_card_label(raw_name)
+        expansions = MERGED_TEMPLATE_EXPANSIONS.get(raw_name) or MERGED_TEMPLATE_EXPANSIONS.get(
+            canonical
+        )
+        names = expansions if expansions else [canonical]
+        for name in names:
+            prefix = card_prefix_type(name)
+            if prefix in by_prefix:
+                by_prefix[prefix].add(name)
+    return {prefix: sorted(names) for prefix, names in by_prefix.items()}
+
+
+def empty_card_row(key: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "appearances": 0,
+        "avg_rank": None,
+        "win_rate": None,
+        "top4_rate": None,
+        "adjusted_avg_rank": None,
+    }
 
 
 def aggregate_key_stats(items: list[tuple[str, int]], min_apps: int, baseline: float) -> list[dict[str, Any]]:
@@ -169,6 +247,66 @@ def aggregate_key_stats(items: list[tuple[str, int]], min_apps: int, baseline: f
             rows.append({"key": key, **stat.to_dict(baseline_rank=baseline, prior=8)})
     rows.sort(key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"]))
     return rows
+
+
+def aggregate_single_cards_by_catalog(
+    items: list[tuple[str, int]],
+    baseline: float,
+    catalog: dict[str, list[str]],
+    *,
+    sample_first: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    stats: dict[str, RankStats] = defaultdict(RankStats)
+    for key, rank in items:
+        if key:
+            stats[key].add(rank)
+
+    annotated: list[dict[str, Any]] = []
+    by_prefix: dict[str, list[dict[str, Any]]] = {}
+    for prefix_type in CARD_PREFIX_TYPES:
+        if prefix_type == "其他":
+            continue
+        group_rows: list[dict[str, Any]] = []
+        for key in catalog.get(prefix_type, []):
+            stat = stats.get(key)
+            if stat and stat.appearances > 0:
+                group_rows.append({"key": key, **stat.to_dict(baseline_rank=baseline, prior=8)})
+            else:
+                group_rows.append(empty_card_row(key))
+
+        with_data = [row for row in group_rows if row["appearances"] > 0]
+        without_data = [row for row in group_rows if row["appearances"] == 0]
+        if sample_first:
+            with_data.sort(
+                key=lambda row: (
+                    -row["appearances"],
+                    row["adjusted_avg_rank"],
+                    row["avg_rank"],
+                    -row["top4_rate"],
+                )
+            )
+        else:
+            with_data.sort(
+                key=lambda row: (row["adjusted_avg_rank"], row["avg_rank"], -row["top4_rate"])
+            )
+        without_data.sort(key=lambda row: row["key"])
+        ordered_rows = with_data + without_data
+
+        ranked_rows: list[dict[str, Any]] = []
+        rank = 1
+        for row in ordered_rows:
+            ranked_row = {
+                **row,
+                "prefix_type": prefix_type,
+                "prefix_rank": rank if row["appearances"] > 0 else None,
+            }
+            if row["appearances"] > 0:
+                rank += 1
+            ranked_rows.append(ranked_row)
+            annotated.append(ranked_row)
+        if ranked_rows:
+            by_prefix[prefix_type] = ranked_rows
+    return annotated, by_prefix
 
 
 def aggregate_key_stats_by_prefix(
@@ -508,7 +646,7 @@ def load_player_features(
     cards_by_player: dict[int, list[str]] = defaultdict(list)
     card_rows = conn.execute(
         """
-        SELECT player_id, card_name
+        SELECT player_id, card_name, slot_index
         FROM cards
         WHERE player_id IN ({})
         ORDER BY player_id, slot_index
@@ -518,7 +656,13 @@ def load_player_features(
     for row in card_rows:
         card_name = str(row["card_name"])
         if card_name != "unknown":
-            cards_by_player[int(row["player_id"])].append(card_name)
+            player_id = int(row["player_id"])
+            slot_index = int(row["slot_index"])
+            hero_context = [
+                {"stars": hero.stars} for hero in heroes_by_player.get(player_id, [])
+            ]
+            resolved_name = resolve_card_label(card_name, slot_index, hero_context)
+            cards_by_player[player_id].append(resolved_name)
 
     features: list[PlayerFeature] = []
     for player in player_rows:
@@ -1761,8 +1905,11 @@ def analyze_cards(
         )
     )
 
-    single_cards, single_cards_by_prefix = aggregate_key_stats_by_prefix(
-        single_items, min_apps, baseline, sample_first=True
+    single_cards, single_cards_by_prefix = aggregate_single_cards_by_catalog(
+        single_items,
+        baseline,
+        load_report_card_catalog(),
+        sample_first=True,
     )
     first_card_rankings, first_card_rankings_by_prefix = aggregate_key_stats_by_prefix(
         first_card_items, max(6, min_apps // 2), baseline, sample_first=True
@@ -1879,9 +2026,12 @@ def analyze_heroes_and_equipment(
         )
     )
 
+    dict_character, _ = load_game_config()
     recommendations = []
     for hero in heroes:
         hero_name = hero["hero_name"]
+        config_entry = dict_character.get(hero_name)
+        hero_traits = [str(trait) for trait in config_entry[1:]] if config_entry else []
         items = []
         low_sample_items = []
         reliable_item_min = max(8, int(hero["appearances"] * 0.05))
@@ -1912,6 +2062,7 @@ def analyze_heroes_and_equipment(
         recommendations.append(
             {
                 "hero_name": hero_name,
+                "hero_traits": hero_traits,
                 "hero_stats": hero,
                 "recommended_items": items[:6],
                 "low_sample_observations": low_sample_items[:4],
@@ -2438,8 +2589,16 @@ def append_hero_equipment_block(lines: list[str], row: dict[str, Any]) -> None:
     lines.append("")
 
 
-def render_pct(value: float) -> str:
+def render_pct(value: float | None) -> str:
+    if value is None:
+        return "—"
     return f"{value:.1f}%"
+
+
+def render_card_metric(value: float | None, *, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.{digits}f}"
 
 
 def append_comp_markdown(lines: list[str], comp: dict[str, Any]) -> None:
@@ -2598,7 +2757,7 @@ def render_md(data: dict[str, Any]) -> str:
             top_cards = "、".join(
                 f"{prefix_type}类 {rows[0]['key']}（修正 {rows[0]['adjusted_avg_rank']:.2f}）"
                 for prefix_type in CARD_PREFIX_TYPES
-                if (rows := cards_by_prefix.get(prefix_type))
+                if (rows := cards_by_prefix.get(prefix_type)) and rows[0]["appearances"] > 0
             )
         else:
             top_cards = "、".join(
@@ -2706,12 +2865,15 @@ def render_md(data: dict[str, Any]) -> str:
             lines.append("")
             lines.append("| 组内排名 | 卡牌 | 样本 | 每局平均 | 修正名次 | 平均名次 | 前四率 | 吃鸡率 |")
             lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-            for row in prefix_rows[:12]:
+            for row in prefix_rows:
+                rank_label = "—" if row.get("prefix_rank") is None else str(row["prefix_rank"])
                 lines.append(
-                    f"| {row['prefix_rank']} | {row['key']} | {row['appearances']} | "
-                    f"{row.get('avg_appearances_per_match', 0):.2f} | {row['adjusted_avg_rank']:.2f} | "
-                    f"{row['avg_rank']:.2f} | {render_pct(row['top4_rate'])} | "
-                    f"{render_pct(row['win_rate'])} |"
+                    f"| {rank_label} | {row['key']} | {row['appearances']} | "
+                    f"{row.get('avg_appearances_per_match', 0):.2f} | "
+                    f"{render_card_metric(row.get('adjusted_avg_rank'))} | "
+                    f"{render_card_metric(row.get('avg_rank'))} | "
+                    f"{render_pct(row.get('top4_rate'))} | "
+                    f"{render_pct(row.get('win_rate'))} |"
                 )
             lines.append("")
     else:
@@ -2835,9 +2997,10 @@ def render_md(data: dict[str, Any]) -> str:
     lines.append("")
     recommendations = data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
     equipment_xlsx = data.get("outputs", {}).get("equipment_xlsx", "data/latest_meta_analysis_equipment.xlsx")
+    equipment_html = data.get("outputs", {}).get("equipment_html", "data/latest_meta_analysis_equipment.html")
     with_items = sum(1 for row in recommendations if row.get("has_equipment_data"))
     lines.append(
-        f"每位英雄的详细出装推荐已导出至 **`{equipment_xlsx}`**（Excel），"
+        f"每位英雄的详细出装推荐已导出至 **`{equipment_xlsx}`**（Excel）与 **`{equipment_html}`**（可筛选 HTML），"
         f"覆盖过滤后样本中出现的全部 **{len(recommendations)}** 个棋子；"
         f"其中 **{with_items}** 个有可靠或低样本出装记录。"
     )
@@ -3065,7 +3228,8 @@ def html_trap_group(title: str, rows: list[dict[str, Any]]) -> str:
 def html_prefix_card_sections(cards_by_prefix: dict[str, list[dict[str, Any]]], limit: int = 3) -> str:
     sections: list[str] = []
     for prefix_type in CARD_PREFIX_TYPES:
-        rows = cards_by_prefix.get(prefix_type, [])[:limit]
+        rows = cards_by_prefix.get(prefix_type, [])
+        rows = [row for row in rows if row["appearances"] > 0][:limit]
         if not rows:
             continue
         items = "\n".join(
@@ -3074,6 +3238,1493 @@ def html_prefix_card_sections(cards_by_prefix: dict[str, list[dict[str, Any]]], 
         )
         sections.append(f"<div><h4>{esc(prefix_type)}类</h4><ul>{items}</ul></div>")
     return "".join(sections) or "<div><h4>单卡</h4><ul><li>样本不足</li></ul></div>"
+
+
+def split_strategy_label(label: str) -> tuple[str, str]:
+    if " / " in label:
+        bond, carries = label.split(" / ", 1)
+        return bond.strip(), carries.strip()
+    return label.strip(), ""
+
+
+def html_strategy_cell(label: str) -> str:
+    bond, carries = split_strategy_label(label)
+    carries_html = (
+        f'<div class="carries">{esc(carries)}</div>' if carries else ""
+    )
+    return (
+        f'<div class="strategy-cell">'
+        f'<div class="bond">{esc(bond)}</div>'
+        f"{carries_html}"
+        f"</div>"
+    )
+
+
+def html_top_strategies_cell(strategies: list[dict[str, Any]], limit: int = 3) -> str:
+    if not strategies:
+        return '<span class="muted">样本不足</span>'
+    items: list[str] = []
+    for item in strategies[:limit]:
+        bond, _ = split_strategy_label(item["label"])
+        title = esc(f"{item['label']}({item['samples']})")
+        items.append(
+            f'<span class="strategy-brief" title="{title}">'
+            f"{esc(bond)}({item['samples']})</span>"
+        )
+    return '<div class="strategy-list">' + "".join(items) + "</div>"
+
+
+def _html_table_cell(
+    text: str,
+    *,
+    sort_value: str | float | int | None = None,
+    html: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "text": text,
+        "sort": str(sort_value if sort_value is not None else text),
+        "html": html,
+    }
+
+
+def html_sortable_table_page(
+    *,
+    title: str,
+    subtitle: str,
+    note: str,
+    headers: list[tuple[str, str]],
+    rows: list[list[dict[str, Any]]],
+) -> str:
+    header_parts: list[str] = []
+    for index, (label, sort_type) in enumerate(headers):
+        th_class = "sortable sort-asc" if index == 0 else "sortable"
+        data_dir = ' data-dir="asc"' if index == 0 else ""
+        header_parts.append(
+            f'<th class="{th_class}" data-sort="{esc(sort_type)}"{data_dir}>{esc(label)}</th>'
+        )
+    header_html = "\n".join(header_parts)
+    body_rows: list[str] = []
+    for row in rows:
+        cells = "\n".join(
+            (
+                f'<td data-sort="{esc(cell["sort"])}">{cell["html"]}</td>'
+                if cell.get("html")
+                else f'<td data-sort="{esc(cell["sort"])}">{esc(cell["text"])}</td>'
+            )
+            for cell in row
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    body_html = "\n".join(body_rows) or '<tr><td colspan="{0}">样本不足</td></tr>'.format(
+        len(headers)
+    )
+    generated = esc(subtitle.split("·")[-1].strip() if "·" in subtitle else subtitle)
+    initial_sort_label = esc(headers[0][0]) if headers else ""
+    note_html = f'<div class="note">{esc(note)}</div>' if note.strip() else ""
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{esc(title)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #10131f;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: #f8fafc;
+    }}
+    .poster {{
+      width: 1080px;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 36px 32px 42px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(91,141,239,.45), transparent 28%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.32), transparent 24%),
+        linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
+    }}
+    header {{ margin-bottom: 18px; }}
+    .eyebrow {{ color: #fbbf24; font-weight: 800; letter-spacing: 4px; font-size: 14px; }}
+    .title-row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 12px 20px;
+      margin: 8px 0;
+    }}
+    h1 {{ font-size: 40px; margin: 0; line-height: 1.1; }}
+    .sort-status {{
+      color: #93c5fd;
+      font-size: 36px;
+      font-weight: 600;
+      line-height: 1.1;
+      white-space: nowrap;
+    }}
+    .sub {{ color: #cbd5e1; font-size: 18px; line-height: 1.45; }}
+    .note {{ color: #94a3b8; font-size: 15px; margin: 10px 0 16px; line-height: 1.45; }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 20px;
+      background: rgba(255,255,255,.06);
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }}
+    th, td {{
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      position: sticky;
+      top: 0;
+      background: rgba(21,26,45,.96);
+      color: #fde68a;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }}
+    th.sort-asc::after {{ content: " ▲"; color: #93c5fd; }}
+    th.sort-desc::after {{ content: " ▼"; color: #93c5fd; }}
+    tr:hover td {{ background: rgba(255,255,255,.04); }}
+    td {{ color: #dbeafe; line-height: 1.35; }}
+    .strategy-cell .bond {{ color: #fde68a; font-weight: 700; }}
+    .strategy-cell .carries {{
+      color: #bfdbfe;
+      font-size: 13px;
+      margin-top: 4px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }}
+    .strategy-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 120px;
+      max-width: 220px;
+    }}
+    .strategy-brief {{
+      display: inline-block;
+      background: rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: 3px 8px;
+      font-size: 13px;
+      color: #e0f2fe;
+      overflow-wrap: anywhere;
+    }}
+    .muted {{ color: #94a3b8; }}
+    footer {{ margin-top: 18px; color: #94a3b8; font-size: 14px; text-align: center; }}
+  </style>
+</head>
+<body>
+<main class="poster">
+  <header>
+    <div class="eyebrow">DZPPQ META TABLE</div>
+    <div class="title-row">
+      <h1>{esc(title)}</h1>
+      <span class="sort-status" id="sort-status">当前按 {initial_sort_label} 升序</span>
+    </div>
+    <div class="sub">{esc(subtitle)}</div>
+    {note_html}
+  </header>
+  <div class="table-wrap">
+    <table class="sortable-table">
+      <thead><tr>{header_html}</tr></thead>
+      <tbody>{body_html}</tbody>
+    </table>
+  </div>
+  <footer>{generated}</footer>
+</main>
+<script>
+const sortStatusEl = document.getElementById("sort-status");
+
+function updateSortStatus(th, dir) {{
+  if (!sortStatusEl || !th) {{
+    return;
+  }}
+  const label = th.textContent.replace(/\\s*[▲▼]\\s*$/, "").trim();
+  const direction = dir === "desc" ? "降序" : "升序";
+  sortStatusEl.textContent = `当前按 ${{label}} ${{direction}}`;
+}}
+
+document.querySelectorAll("th.sortable").forEach((th, colIndex) => {{
+  th.addEventListener("click", () => {{
+    const table = th.closest("table");
+    const tbody = table.querySelector("tbody");
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    const sortType = th.dataset.sort || "text";
+    const isActive = th.classList.contains("sort-asc") || th.classList.contains("sort-desc");
+    const newDir = isActive && th.dataset.dir === "asc" ? "desc" : "asc";
+    table.querySelectorAll("th.sortable").forEach((header) => {{
+      header.dataset.dir = "";
+      header.classList.remove("sort-asc", "sort-desc");
+    }});
+    th.dataset.dir = newDir;
+    th.classList.add(newDir === "asc" ? "sort-asc" : "sort-desc");
+    updateSortStatus(th, newDir);
+    rows.sort((left, right) => {{
+      const leftVal = left.cells[colIndex]?.dataset.sort ?? "";
+      const rightVal = right.cells[colIndex]?.dataset.sort ?? "";
+      if (sortType === "numeric") {{
+        const leftNum = parseFloat(leftVal);
+        const rightNum = parseFloat(rightVal);
+        const safeLeft = Number.isFinite(leftNum) ? leftNum : Number.MAX_VALUE;
+        const safeRight = Number.isFinite(rightNum) ? rightNum : Number.MAX_VALUE;
+        return newDir === "asc" ? safeLeft - safeRight : safeRight - safeLeft;
+      }}
+      const cmp = String(leftVal).localeCompare(String(rightVal), "zh-CN");
+      return newDir === "asc" ? cmp : -cmp;
+    }});
+    rows.forEach((row) => tbody.appendChild(row));
+  }});
+}});
+
+const initialSortHeader = document.querySelector("th.sort-asc, th.sort-desc");
+if (initialSortHeader) {{
+  updateSortStatus(initialSortHeader, initialSortHeader.dataset.dir || "asc");
+}}
+</script>
+</body>
+</html>
+"""
+
+
+def render_card_prefix_table_html(data: dict[str, Any], prefix_type: str) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    cards = data["rankings"]["cards"]
+    prefix_rows = cards.get("single_cards_by_prefix", {}).get(prefix_type, [])
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = CARD_MERGE_NOTES.get(prefix_type, "")
+
+    headers: list[tuple[str, str]] = [
+        ("组内排名", "numeric"),
+        ("卡牌", "text"),
+        ("样本", "numeric"),
+        ("每局平均", "numeric"),
+        ("修正名次", "numeric"),
+        ("平均名次", "numeric"),
+        ("前四率", "numeric"),
+        ("吃鸡率", "numeric"),
+    ]
+    if prefix_type == "蓝":
+        headers.extend(
+            [
+                ("修正队伍名次", "numeric"),
+                ("队伍名次", "numeric"),
+                ("队伍前二率", "numeric"),
+            ]
+        )
+
+    team_rank_map = {
+        row["key"]: row
+        for row in cards.get("blue_cards_team_rank_by_prefix", {}).get("蓝", [])
+    }
+    table_rows: list[list[dict[str, Any]]] = []
+    for row in prefix_rows:
+        rank_label = "—" if row.get("prefix_rank") is None else str(row["prefix_rank"])
+        cells = [
+            _html_table_cell(rank_label, sort_value=row.get("prefix_rank", 9999)),
+            _html_table_cell(row["key"], sort_value=row["key"]),
+            _html_table_cell(str(row["appearances"]), sort_value=row["appearances"]),
+            _html_table_cell(
+                f"{row.get('avg_appearances_per_match', 0):.2f}",
+                sort_value=row.get("avg_appearances_per_match", 0),
+            ),
+            _html_table_cell(
+                render_card_metric(row.get("adjusted_avg_rank")),
+                sort_value=row.get("adjusted_avg_rank", 999),
+            ),
+            _html_table_cell(
+                render_card_metric(row.get("avg_rank")),
+                sort_value=row.get("avg_rank", 999),
+            ),
+            _html_table_cell(
+                render_pct(row.get("top4_rate")),
+                sort_value=row.get("top4_rate", -1),
+            ),
+            _html_table_cell(
+                render_pct(row.get("win_rate")),
+                sort_value=row.get("win_rate", -1),
+            ),
+        ]
+        if prefix_type == "蓝":
+            team = team_rank_map.get(row["key"], {})
+            cells.extend(
+                [
+                    _html_table_cell(
+                        render_card_metric(team.get("adjusted_avg_rank")) if team else "—",
+                        sort_value=team.get("adjusted_avg_rank", 999),
+                    ),
+                    _html_table_cell(
+                        render_card_metric(team.get("avg_rank")) if team else "—",
+                        sort_value=team.get("avg_rank", 999),
+                    ),
+                    _html_table_cell(
+                        render_pct(team.get("team_top2_rate")) if team else "—",
+                        sort_value=team.get("team_top2_rate", -1),
+                    ),
+                ]
+            )
+        table_rows.append(cells)
+
+    return html_sortable_table_page(
+        title=f"{prefix_type}类单卡排名",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=table_rows,
+    )
+
+
+def render_duo_composition_table_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    duo_rows = data["rankings"].get("duo_composition_synergy", [])
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = "基于同队两家的最终策略组合与重算队伍排名，仅作双排分工参考；阵容分列展示以避免拥挤。"
+
+    headers = [
+        ("阵容A", "text"),
+        ("阵容B", "text"),
+        ("队伍名次", "numeric"),
+        ("相对基线提升", "numeric"),
+        ("队伍前二率", "numeric"),
+        ("队伍吃鸡率", "numeric"),
+        ("样本", "numeric"),
+        ("置信度", "text"),
+    ]
+    table_rows: list[list[dict[str, Any]]] = []
+    for row in duo_rows:
+        table_rows.append(
+            [
+                {
+                    "text": row["strategy_a"],
+                    "sort": row["strategy_a"],
+                    "html": html_strategy_cell(row["strategy_a"]),
+                },
+                {
+                    "text": row["strategy_b"],
+                    "sort": row["strategy_b"],
+                    "html": html_strategy_cell(row["strategy_b"]),
+                },
+                _html_table_cell(
+                    f"{row['team_avg_rank']:.2f}",
+                    sort_value=row["team_avg_rank"],
+                ),
+                _html_table_cell(
+                    f"{row['team_lift_vs_baseline']:.2f}",
+                    sort_value=row["team_lift_vs_baseline"],
+                ),
+                _html_table_cell(
+                    render_pct(row["team_top2_rate"]),
+                    sort_value=row["team_top2_rate"],
+                ),
+                _html_table_cell(
+                    render_pct(row["team_win_rate"]),
+                    sort_value=row["team_win_rate"],
+                ),
+                _html_table_cell(str(row["appearances"]), sort_value=row["appearances"]),
+                _html_table_cell(row["confidence"], sort_value=row["confidence"]),
+            ]
+        )
+
+    return html_sortable_table_page(
+        title="双人阵容配合推荐",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=table_rows,
+    )
+
+
+def render_low_cost_carry_table_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    rows = [
+        row
+        for row in data["rankings"].get("low_cost_carry_three_star_difficulty", [])
+        if row.get("is_low_cost")
+    ]
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = (
+        "同场多家阵容需要同一个低费3星主C时，即使阵容路线不同，也计入同行压力；"
+        "主要阵容仅展示羁绊标题与样本数，完整阵容可悬停查看。"
+    )
+
+    headers = [
+        ("棋子", "text"),
+        ("费用", "numeric"),
+        ("平均同场需求", "numeric"),
+        ("最高同场需求", "numeric"),
+        ("多家需求对局率", "numeric"),
+        ("平均名次", "numeric"),
+        ("样本", "numeric"),
+        ("主要阵容", "text"),
+    ]
+    table_rows: list[list[dict[str, Any]]] = []
+    for row in rows:
+        strategies = row.get("top_strategies", [])
+        table_rows.append(
+            [
+                _html_table_cell(row["hero_name"], sort_value=row["hero_name"]),
+                _html_table_cell(
+                    str(row.get("tier") or "—"),
+                    sort_value=row.get("tier") or 99,
+                ),
+                _html_table_cell(
+                    f"{row['avg_same_match_needers']:.2f}",
+                    sort_value=row["avg_same_match_needers"],
+                ),
+                _html_table_cell(
+                    str(row["max_same_match_needers"]),
+                    sort_value=row["max_same_match_needers"],
+                ),
+                _html_table_cell(
+                    render_pct(row["multi_needer_match_rate"]),
+                    sort_value=row["multi_needer_match_rate"],
+                ),
+                _html_table_cell(f"{row['avg_rank']:.2f}", sort_value=row["avg_rank"]),
+                _html_table_cell(str(row["appearances"]), sort_value=row["appearances"]),
+                {
+                    "text": "；".join(
+                        f"{item['label']}({item['samples']})" for item in strategies[:3]
+                    )
+                    or "样本不足",
+                    "sort": "；".join(item["label"] for item in strategies[:3]) or "",
+                    "html": html_top_strategies_cell(strategies),
+                },
+            ]
+        )
+
+    return html_sortable_table_page(
+        title="低费主C热门程度",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=table_rows,
+    )
+
+
+def html_variant_board_cards(comp: dict[str, Any]) -> str:
+    variants = comp.get("variants", {})
+    cards: list[str] = []
+    for level in ("7", "8", "9"):
+        variant = variants.get(level, {})
+        heroes = variant.get("heroes", [])
+        hero_chips = "".join(f'<span class="hero-chip">{esc(hero)}</span>' for hero in heroes)
+        sample_note = (
+            f"样本 {variant.get('sample_count', 0)}"
+            if variant.get("sample_count")
+            else "推导阵容"
+            if variant.get("source") == "derived"
+            else ""
+        )
+        cards.append(
+            f"""
+            <article class="board-card">
+              <div class="board-head">
+                <span class="level-badge">Lv{level}</span>
+                <span class="source-badge">{esc(variant.get("source", "—"))}</span>
+                <span class="conf-badge">{esc(variant.get("confidence", "—"))}</span>
+                {f'<span class="sample-badge">{esc(sample_note)}</span>' if sample_note else ""}
+              </div>
+              <p class="bond-note">{esc(variant.get("bond_note", "—"))}</p>
+              <div class="hero-chips">{hero_chips or '<span class="muted">样本不足</span>'}</div>
+            </article>
+            """
+        )
+    return f'<div class="board-grid">{"".join(cards)}</div>'
+
+
+def html_comp_detail_page(comp: dict[str, Any], *, style: str, page_index: int) -> str:
+    stats = comp["stats"]
+    difficulty = comp.get("difficulty", {})
+    carry_text = " > ".join(
+        f"P{item.get('carry_rank', idx)} {item['hero_name']}({render_pct(item['share'])})"
+        for idx, item in enumerate(comp.get("main_carries", [])[:3], start=1)
+    )
+    req_text = "；".join(
+        f"{row['hero_name']} {row['recommended_min_stars']}星起(前四均{row['avg_stars_top4']:.1f}，三件套{render_pct(row['three_item_rate'])})"
+        for row in comp.get("carry_requirements", [])[:3]
+    )
+    equip_parts: list[str] = []
+    for note in comp.get("carry_equipment_notes", [])[:3]:
+        important = [
+            item for item in note["items"] if item["label"] in ("疑似刚需", "高价值")
+        ][:3]
+        if important:
+            equip_parts.append(
+                f"{note['hero_name']}："
+                + "、".join(
+                    f"{item['equipment_name']}({item['label']})"
+                    for item in important
+                )
+            )
+    jiujiu_parts: list[str] = []
+    for req in comp.get("jiujiu_requirements", []):
+        wearers = "、".join(
+            f"{item['hero_name']}({render_pct(item['share'])})"
+            for item in req.get("recommended_wearers", [])[:3]
+        )
+        jiujiu_parts.append(
+            f"{req['recommended_jiujiu']}（{render_pct(req['dependency_rate'])}需啾啾开"
+            f"{req['trait']}-{req['target_tier']}，推荐：{wearers or '待观察'}）"
+        )
+    bonds = "、".join(
+        f"{item['bond']}({render_pct(item['share'])})" for item in comp.get("common_bonds", [])[:5]
+    )
+    breakdown = " · ".join(
+        f"{row['play_style']}{render_pct(row['share'])}"
+        for row in comp.get("play_style_breakdown", [])[:3]
+    )
+    star_pressure = (
+        f"三星均{difficulty.get('avg_three_star_units', 0):.2f} / "
+        f"前四均{difficulty.get('avg_top4_three_star_units', 0):.2f} / "
+        f"同行{difficulty.get('avg_same_match_contest', 0):.2f}"
+        f"({difficulty.get('contest_basis', '阵容相似')})"
+        if difficulty
+        else "样本不足"
+    )
+    popularity = comp.get("popularity", {})
+    pop_text = (
+        f"玩家占比 {render_pct(popularity.get('pick_rate', 0))} / "
+        f"对局出现 {render_pct(popularity.get('match_rate', 0))}"
+        if popularity
+        else "—"
+    )
+    return f"""
+    <section class="comp-page" data-style="{esc(style)}" data-index="{page_index}">
+      <div class="comp-page-inner">
+        <header class="comp-page-head">
+          <div class="comp-head">
+            <span class="badge">{esc(style)}</span>
+            <span class="conf-pill">{esc(comp.get('confidence', '—'))}置信</span>
+          </div>
+          <h2>{esc(comp['label'])}</h2>
+          <div class="metrics">
+            <b>Avg {stats['avg_rank']:.2f}</b>
+            <b>Top4 {render_pct(stats['top4_rate'])}</b>
+            <b>吃鸡 {render_pct(stats['win_rate'])}</b>
+            <b>n={stats['appearances']}</b>
+          </div>
+        </header>
+        <div class="detail-grid">
+          <div class="detail-panel">
+            <h3>阵容概览</h3>
+            <p><strong>主C：</strong>{esc(carry_text or '样本不足')}</p>
+            <p><strong>成型门槛：</strong>{esc(req_text or '样本不足')}</p>
+            <p><strong>三星压力：</strong>{esc(star_pressure)}</p>
+            <p><strong>热门程度：</strong>{esc(pop_text)}</p>
+            <p><strong>路线：</strong>{esc(unique_route_bonds(comp))}</p>
+            <p><strong>类型样本：</strong>{esc(breakdown or style)}</p>
+            <p><strong>常见羁绊：</strong>{esc(bonds or '无稳定羁绊')}</p>
+          </div>
+          <div class="detail-panel">
+            <h3>关键装备与啾啾</h3>
+            <p><strong>主C关键装备：</strong>{esc('；'.join(equip_parts) or '样本不足')}</p>
+            <p><strong>啾啾成型：</strong>{esc('；'.join(jiujiu_parts) or '无明确依赖')}</p>
+          </div>
+        </div>
+        <div class="board-section">
+          <h3>7 / 8 / 9 级推荐阵容</h3>
+          {html_variant_board_cards(comp)}
+        </div>
+      </div>
+    </section>
+    """
+
+
+def render_composition_recommendations_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    recommendations = data["rankings"].get("composition_recommendations", {})
+    pages: list[str] = []
+    page_index = 0
+    style_counts = {style: len(recommendations.get(style, [])) for style in PLAY_STYLES}
+    for style in PLAY_STYLES:
+        for comp in recommendations.get(style, []):
+            pages.append(html_comp_detail_page(comp, style=style, page_index=page_index))
+            page_index += 1
+    pages_html = "\n".join(pages) or '<section class="comp-page active"><p class="empty">当前样本不足。</p></section>'
+    total_pages = max(page_index, 1)
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    style_filter = "".join(
+        f'<button type="button" class="style-filter" data-style="{esc(style)}">{esc(style)} ({count})</button>'
+        for style, count in style_counts.items()
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>阵容推荐详情</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #10131f;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: #f8fafc;
+    }}
+    .poster {{
+      width: 1080px;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 36px 32px 42px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(91,141,239,.45), transparent 28%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.32), transparent 24%),
+        linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
+      min-height: 100vh;
+    }}
+    header {{ margin-bottom: 18px; }}
+    .eyebrow {{ color: #fbbf24; font-weight: 800; letter-spacing: 4px; font-size: 14px; }}
+    h1 {{ font-size: 40px; margin: 8px 0; line-height: 1.1; }}
+    .sub {{ color: #cbd5e1; font-size: 18px; line-height: 1.45; }}
+    .pager-bar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      margin: 18px 0;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.14);
+    }}
+    .pager-controls {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+    .pager-btn, .style-filter {{
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #e0f2fe;
+      border-radius: 999px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 14px;
+    }}
+    .pager-btn:hover, .style-filter:hover {{ background: rgba(255,255,255,.14); }}
+    .style-filter.active, .pager-btn:disabled {{ opacity: .55; cursor: default; }}
+    .style-filter.active {{ background: rgba(251,191,36,.22); color: #fde68a; border-color: rgba(251,191,36,.45); }}
+    .page-status {{ color: #93c5fd; font-size: 18px; font-weight: 600; }}
+    .comp-page {{ display: none; }}
+    .comp-page.active {{ display: block; }}
+    .comp-page-inner {{
+      background: rgba(255,255,255,.09);
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 28px;
+      padding: 24px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.24);
+    }}
+    .comp-head {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+    .badge {{ background: #fbbf24; color: #111827; border-radius: 999px; padding: 6px 12px; font-weight: 900; }}
+    .conf-pill {{ background: rgba(147,197,253,.18); color: #bfdbfe; border-radius: 999px; padding: 6px 12px; font-size: 13px; }}
+    h2 {{ margin: 10px 0 0; font-size: 30px; line-height: 1.2; overflow-wrap: anywhere; }}
+    .metrics {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; color: #bfdbfe; }}
+    .detail-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }}
+    .detail-panel {{
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 20px;
+      padding: 16px;
+    }}
+    .detail-panel h3, .board-section h3 {{ margin: 0 0 10px; color: #fde68a; font-size: 20px; }}
+    p {{ margin: 7px 0; color: #dbeafe; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }}
+    .board-section {{ margin-top: 18px; }}
+    .board-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }}
+    .board-card {{
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 18px;
+      padding: 14px;
+      min-height: 220px;
+    }}
+    .board-head {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }}
+    .level-badge, .source-badge, .conf-badge, .sample-badge {{
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .level-badge {{ background: rgba(251,191,36,.22); color: #fde68a; }}
+    .source-badge {{ background: rgba(147,197,253,.18); color: #bfdbfe; }}
+    .conf-badge {{ background: rgba(255,255,255,.08); color: #cbd5e1; }}
+    .sample-badge {{ background: rgba(248,113,113,.18); color: #fecaca; }}
+    .bond-note {{ color: #cbd5e1; font-size: 13px; line-height: 1.4; min-height: 38px; }}
+    .hero-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .hero-chip {{
+      background: rgba(255,255,255,.08);
+      border-radius: 10px;
+      padding: 4px 8px;
+      font-size: 13px;
+      color: #fef3c7;
+      line-height: 1.3;
+    }}
+    .muted, .empty {{ color: #94a3b8; }}
+    footer {{ margin-top: 18px; color: #94a3b8; font-size: 14px; text-align: center; }}
+    @media (max-width: 900px) {{
+      .detail-grid, .board-grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+<main class="poster">
+  <header>
+    <div class="eyebrow">DZPPQ COMP GUIDE</div>
+    <h1>阵容推荐详情</h1>
+    <div class="sub">{esc(subtitle)} · 每页一套阵容，含 7/8/9 级推荐</div>
+  </header>
+  <div class="pager-bar">
+    <div class="pager-controls">
+      <button type="button" class="pager-btn" id="prev-page">上一页</button>
+      <button type="button" class="pager-btn" id="next-page">下一页</button>
+      <span class="page-status" id="page-status">第 1 / {total_pages} 页</span>
+    </div>
+    <div class="pager-controls">
+      <button type="button" class="style-filter active" data-style="all">全部</button>
+      {style_filter}
+    </div>
+  </div>
+  <div id="comp-pages">
+    {pages_html}
+  </div>
+  <footer>{esc(generated)}</footer>
+</main>
+<script>
+const pages = Array.from(document.querySelectorAll(".comp-page"));
+let activeStyle = "all";
+let activeIndex = 0;
+
+function visiblePages() {{
+  return pages.filter((page) => activeStyle === "all" || page.dataset.style === activeStyle);
+}}
+
+function showPage(index) {{
+  const filtered = visiblePages();
+  if (!filtered.length) {{
+    pages.forEach((page) => page.classList.remove("active"));
+    document.getElementById("page-status").textContent = "当前类型暂无阵容";
+    return;
+  }}
+  activeIndex = Math.max(0, Math.min(index, filtered.length - 1));
+  pages.forEach((page) => page.classList.remove("active"));
+  filtered[activeIndex].classList.add("active");
+  const current = filtered[activeIndex];
+  document.getElementById("page-status").textContent =
+    `第 ${{activeIndex + 1}} / ${{filtered.length}} 页 · ${{current.dataset.style}}`;
+  document.getElementById("prev-page").disabled = activeIndex <= 0;
+  document.getElementById("next-page").disabled = activeIndex >= filtered.length - 1;
+}}
+
+document.getElementById("prev-page").addEventListener("click", () => showPage(activeIndex - 1));
+document.getElementById("next-page").addEventListener("click", () => showPage(activeIndex + 1));
+document.querySelectorAll(".style-filter").forEach((button) => {{
+  button.addEventListener("click", () => {{
+    document.querySelectorAll(".style-filter").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    activeStyle = button.dataset.style;
+    showPage(0);
+  }});
+}});
+if (pages.length) {{
+  pages[0].classList.add("active");
+  showPage(0);
+}}
+</script>
+</body>
+</html>
+"""
+
+
+def build_jiujiu_comp_table_rows(data: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    rows: list[list[dict[str, Any]]] = []
+    seen: set[tuple[str, str]] = set()
+    recommendations = data["rankings"].get("composition_recommendations", {})
+    for style in PLAY_STYLES:
+        for comp in recommendations.get(style, []):
+            if not comp.get("jiujiu_requirements"):
+                continue
+            stats = comp["stats"]
+            for req in comp["jiujiu_requirements"]:
+                key = (comp["label"], req.get("recommended_jiujiu", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                wearers = "、".join(
+                    f"{item['hero_name']}({render_pct(item['share'])})"
+                    for item in req.get("recommended_wearers", [])[:3]
+                ) or "待观察"
+                target_bond = f"{req.get('trait', '—')}-{req.get('target_tier', '—')}"
+                rows.append(
+                    [
+                        {
+                            "text": comp["label"],
+                            "sort": comp["label"],
+                            "html": html_strategy_cell(comp["label"]),
+                        },
+                        _html_table_cell(style, sort_value=style),
+                        _html_table_cell(req.get("recommended_jiujiu", "—"), sort_value=req.get("recommended_jiujiu", "")),
+                        _html_table_cell(target_bond, sort_value=target_bond),
+                        _html_table_cell(
+                            render_pct(req.get("dependency_rate", 0)),
+                            sort_value=req.get("dependency_rate", 0),
+                        ),
+                        _html_table_cell(wearers, sort_value=wearers),
+                        _html_table_cell(f"{stats['avg_rank']:.2f}", sort_value=stats["avg_rank"]),
+                        _html_table_cell(render_pct(stats["top4_rate"]), sort_value=stats["top4_rate"]),
+                        _html_table_cell(str(stats["appearances"]), sort_value=stats["appearances"]),
+                        _html_table_cell(comp.get("confidence", "—"), sort_value=comp.get("confidence", "")),
+                    ]
+                )
+    return rows
+
+
+def render_jiujiu_comps_table_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = "仅展示推荐阵容中存在明确啾啾成型依赖的策略；点击表头可排序。"
+    headers = [
+        ("阵容", "text"),
+        ("类型", "text"),
+        ("啾啾", "text"),
+        ("目标羁绊", "text"),
+        ("依赖率", "numeric"),
+        ("推荐穿戴", "text"),
+        ("平均名次", "numeric"),
+        ("前四率", "numeric"),
+        ("样本", "numeric"),
+        ("置信度", "text"),
+    ]
+    return html_sortable_table_page(
+        title="带啾啾阵容推荐",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=build_jiujiu_comp_table_rows(data),
+    )
+
+
+def build_jiujiu_wearer_table_rows(data: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    rows: list[list[dict[str, Any]]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in data["rankings"].get("jiujiu", {}).get("jiujiu_rankings", []):
+        item_name = item["equipment_name"]
+        for comp in item.get("recommended_comps", []):
+            for wearer in comp.get("recommended_wearers", []):
+                key = (item_name, wearer["hero_name"], "阵容绑定", comp.get("family_label", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    [
+                        _html_table_cell(item_name, sort_value=item_name),
+                        _html_table_cell(wearer["hero_name"], sort_value=wearer["hero_name"]),
+                        _html_table_cell("阵容绑定", sort_value="阵容绑定"),
+                        {
+                            "text": comp.get("family_label", "—"),
+                            "sort": comp.get("family_label", ""),
+                            "html": html_strategy_cell(comp.get("family_label", "—")),
+                        },
+                        _html_table_cell(str(wearer["appearances"]), sort_value=wearer["appearances"]),
+                        _html_table_cell(render_pct(wearer.get("share", 0)), sort_value=wearer.get("share", 0)),
+                        _html_table_cell(
+                            f"{comp['avg_rank']:.2f}" if comp.get("avg_rank") is not None else "—",
+                            sort_value=comp.get("avg_rank", 999),
+                        ),
+                        _html_table_cell(
+                            render_pct(comp.get("top4_rate", 0)),
+                            sort_value=comp.get("top4_rate", -1),
+                        ),
+                    ]
+                )
+        for hero in item.get("recommended_heroes", []):
+            key = (item_name, hero["hero_name"], "棋子增益", "")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                [
+                    _html_table_cell(item_name, sort_value=item_name),
+                    _html_table_cell(hero["hero_name"], sort_value=hero["hero_name"]),
+                    _html_table_cell("棋子增益", sort_value="棋子增益"),
+                    _html_table_cell("—", sort_value=""),
+                    _html_table_cell(str(hero["appearances"]), sort_value=hero["appearances"]),
+                    _html_table_cell("—", sort_value=-1),
+                    _html_table_cell(f"{hero['avg_rank']:.2f}", sort_value=hero["avg_rank"]),
+                    _html_table_cell(render_pct(hero.get("top4_rate", 0)), sort_value=hero.get("top4_rate", -1)),
+                ]
+            )
+    return rows
+
+
+def render_jiujiu_wearers_table_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = "汇总啾啾在阵容绑定与棋子增益两类证据下的推荐穿戴棋子；点击表头可排序。"
+    headers = [
+        ("啾啾", "text"),
+        ("棋子", "text"),
+        ("证据类型", "text"),
+        ("关联阵容", "text"),
+        ("样本", "numeric"),
+        ("占比", "numeric"),
+        ("平均名次", "numeric"),
+        ("前四率", "numeric"),
+    ]
+    return html_sortable_table_page(
+        title="佩戴啾啾棋子推荐",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=build_jiujiu_wearer_table_rows(data),
+    )
+
+
+def html_filterable_equipment_page(
+    *,
+    title: str,
+    subtitle: str,
+    note: str,
+    headers: list[tuple[str, str]],
+    rows: list[dict[str, Any]],
+) -> str:
+    header_parts: list[str] = []
+    for index, (label, sort_type) in enumerate(headers):
+        th_class = "sortable sort-asc" if index == 0 else "sortable"
+        data_dir = ' data-dir="asc"' if index == 0 else ""
+        header_parts.append(
+            f'<th class="{th_class}" data-sort="{esc(sort_type)}"{data_dir}>{esc(label)}</th>'
+        )
+    header_html = "\n".join(header_parts)
+    body_rows: list[str] = []
+    trait_options: set[str] = set()
+    for row in rows:
+        traits = row.get("traits", [])
+        trait_options.update(traits)
+        trait_attr = esc(",".join(traits))
+        cells = "\n".join(
+            (
+                f'<td data-sort="{esc(cell["sort"])}">{cell["html"]}</td>'
+                if cell.get("html")
+                else f'<td data-sort="{esc(cell["sort"])}">{esc(cell["text"])}</td>'
+            )
+            for cell in row["cells"]
+        )
+        body_rows.append(
+            f'<tr data-tier="{esc(str(row.get("tier") or ""))}" '
+            f'data-traits="{trait_attr}" '
+            f'data-search="{esc(row.get("search_text", ""))}">{cells}</tr>'
+        )
+    body_html = "\n".join(body_rows) or f'<tr><td colspan="{len(headers)}">样本不足</td></tr>'
+    trait_buttons = "".join(
+        f'<button type="button" class="trait-filter" data-trait="{esc(trait)}">{esc(trait)}</button>'
+        for trait in sorted(trait_options)
+    )
+    initial_sort_label = esc(headers[0][0]) if headers else ""
+    note_html = f'<div class="note">{esc(note)}</div>' if note.strip() else ""
+    generated = esc(subtitle.split("·")[-1].strip() if "·" in subtitle else subtitle)
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{esc(title)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #10131f;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: #f8fafc;
+    }}
+    .poster {{
+      width: 1080px;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 36px 32px 42px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(91,141,239,.45), transparent 28%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.32), transparent 24%),
+        linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
+    }}
+    header {{ margin-bottom: 18px; }}
+    .eyebrow {{ color: #fbbf24; font-weight: 800; letter-spacing: 4px; font-size: 14px; }}
+    .title-row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 12px 20px;
+      margin: 8px 0;
+    }}
+    h1 {{ font-size: 40px; margin: 0; line-height: 1.1; }}
+    .sort-status {{
+      color: #93c5fd;
+      font-size: 28px;
+      font-weight: 600;
+      line-height: 1.1;
+      white-space: nowrap;
+    }}
+    .sub {{ color: #cbd5e1; font-size: 18px; line-height: 1.45; }}
+    .note {{ color: #94a3b8; font-size: 15px; margin: 10px 0 16px; line-height: 1.45; }}
+    .filter-bar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 14px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.14);
+    }}
+    .filter-group {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    .filter-label {{ color: #fde68a; font-size: 14px; font-weight: 700; margin-right: 4px; }}
+    .filter-btn, .trait-filter {{
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #e0f2fe;
+      border-radius: 999px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    .filter-btn.active, .trait-filter.active {{
+      background: rgba(251,191,36,.22);
+      color: #fde68a;
+      border-color: rgba(251,191,36,.45);
+    }}
+    .search-input {{
+      min-width: 220px;
+      flex: 1 1 220px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #f8fafc;
+      border-radius: 12px;
+      padding: 8px 12px;
+      font-size: 14px;
+    }}
+    .filter-status {{ color: #93c5fd; font-size: 14px; margin-left: auto; }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 20px;
+      background: rgba(255,255,255,.06);
+    }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+    th, td {{
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      position: sticky;
+      top: 0;
+      background: rgba(21,26,45,.96);
+      color: #fde68a;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }}
+    th.sort-asc::after {{ content: " ▲"; color: #93c5fd; }}
+    th.sort-desc::after {{ content: " ▼"; color: #93c5fd; }}
+    tr:hover td {{ background: rgba(255,255,255,.04); }}
+    tr.hidden {{ display: none; }}
+    td {{ color: #dbeafe; line-height: 1.35; overflow-wrap: anywhere; }}
+    .item-list {{ display: flex; flex-direction: column; gap: 4px; }}
+    .item-chip {{
+      display: inline-block;
+      background: rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: 3px 8px;
+      font-size: 13px;
+      color: #e0f2fe;
+    }}
+    footer {{ margin-top: 18px; color: #94a3b8; font-size: 14px; text-align: center; }}
+  </style>
+</head>
+<body>
+<main class="poster">
+  <header>
+    <div class="eyebrow">DZPPQ EQUIPMENT GUIDE</div>
+    <div class="title-row">
+      <h1>{esc(title)}</h1>
+      <span class="sort-status" id="sort-status">当前按 {initial_sort_label} 升序</span>
+    </div>
+    <div class="sub">{esc(subtitle)}</div>
+    {note_html}
+  </header>
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">费用</span>
+      <button type="button" class="filter-btn active" data-tier="all">全部</button>
+      <button type="button" class="filter-btn" data-tier="1">1费</button>
+      <button type="button" class="filter-btn" data-tier="2">2费</button>
+      <button type="button" class="filter-btn" data-tier="3">3费</button>
+      <button type="button" class="filter-btn" data-tier="4">4费</button>
+      <button type="button" class="filter-btn" data-tier="5">5费</button>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">羁绊</span>
+      <button type="button" class="trait-filter active" data-trait="all">全部</button>
+      {trait_buttons}
+    </div>
+    <input type="search" class="search-input" id="search-input" placeholder="搜索棋子、装备、三件套…">
+    <span class="filter-status" id="filter-status">显示全部</span>
+  </div>
+  <div class="table-wrap">
+    <table class="sortable-table" id="equipment-table">
+      <thead><tr>{header_html}</tr></thead>
+      <tbody>{body_html}</tbody>
+    </table>
+  </div>
+  <footer>{generated}</footer>
+</main>
+<script>
+const sortStatusEl = document.getElementById("sort-status");
+const filterStatusEl = document.getElementById("filter-status");
+const searchInput = document.getElementById("search-input");
+const table = document.getElementById("equipment-table");
+const tbody = table.querySelector("tbody");
+let activeTier = "all";
+let activeTrait = "all";
+
+function updateSortStatus(th, dir) {{
+  if (!sortStatusEl || !th) return;
+  const label = th.textContent.replace(/\\s*[▲▼]\\s*$/, "").trim();
+  sortStatusEl.textContent = `当前按 ${{label}} ${{dir === "desc" ? "降序" : "升序"}}`;
+}}
+
+function applyFilters() {{
+  const keyword = (searchInput.value || "").trim().toLowerCase();
+  let visible = 0;
+  tbody.querySelectorAll("tr").forEach((row) => {{
+    const tierMatch = activeTier === "all" || row.dataset.tier === activeTier;
+    const traits = (row.dataset.traits || "").split(",").filter(Boolean);
+    const traitMatch = activeTrait === "all" || traits.includes(activeTrait);
+    const searchMatch = !keyword || (row.dataset.search || "").toLowerCase().includes(keyword);
+    const show = tierMatch && traitMatch && searchMatch;
+    row.classList.toggle("hidden", !show);
+    if (show) visible += 1;
+  }});
+  filterStatusEl.textContent = keyword
+    ? `筛选后 ${{visible}} 条 · 关键词「${{keyword}}」`
+    : `筛选后 ${{visible}} 条`;
+}}
+
+document.querySelectorAll(".filter-btn").forEach((button) => {{
+  button.addEventListener("click", () => {{
+    document.querySelectorAll(".filter-btn").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    activeTier = button.dataset.tier;
+    applyFilters();
+  }});
+}});
+document.querySelectorAll(".trait-filter").forEach((button) => {{
+  button.addEventListener("click", () => {{
+    document.querySelectorAll(".trait-filter").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    activeTrait = button.dataset.trait;
+    applyFilters();
+  }});
+}});
+searchInput.addEventListener("input", applyFilters);
+
+document.querySelectorAll("th.sortable").forEach((th, colIndex) => {{
+  th.addEventListener("click", () => {{
+    const rows = Array.from(tbody.querySelectorAll("tr:not(.hidden)"));
+    const hiddenRows = Array.from(tbody.querySelectorAll("tr.hidden"));
+    const sortType = th.dataset.sort || "text";
+    const isActive = th.classList.contains("sort-asc") || th.classList.contains("sort-desc");
+    const newDir = isActive && th.dataset.dir === "asc" ? "desc" : "asc";
+    table.querySelectorAll("th.sortable").forEach((header) => {{
+      header.dataset.dir = "";
+      header.classList.remove("sort-asc", "sort-desc");
+    }});
+    th.dataset.dir = newDir;
+    th.classList.add(newDir === "asc" ? "sort-asc" : "sort-desc");
+    updateSortStatus(th, newDir);
+    rows.sort((left, right) => {{
+      const leftVal = left.cells[colIndex]?.dataset.sort ?? "";
+      const rightVal = right.cells[colIndex]?.dataset.sort ?? "";
+      if (sortType === "numeric") {{
+        const leftNum = parseFloat(leftVal);
+        const rightNum = parseFloat(rightVal);
+        const safeLeft = Number.isFinite(leftNum) ? leftNum : Number.MAX_VALUE;
+        const safeRight = Number.isFinite(rightNum) ? rightNum : Number.MAX_VALUE;
+        return newDir === "asc" ? safeLeft - safeRight : safeRight - safeLeft;
+      }}
+      const cmp = String(leftVal).localeCompare(String(rightVal), "zh-CN");
+      return newDir === "asc" ? cmp : -cmp;
+    }});
+    rows.forEach((row) => tbody.appendChild(row));
+    hiddenRows.forEach((row) => tbody.appendChild(row));
+  }});
+}});
+
+const initialSortHeader = document.querySelector("th.sort-asc, th.sort-desc");
+if (initialSortHeader) {{
+  updateSortStatus(initialSortHeader, initialSortHeader.dataset.dir || "asc");
+}}
+applyFilters();
+</script>
+</body>
+</html>
+"""
+
+
+def render_equipment_recommendations_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    note = "可按费用、羁绊和关键词筛选；点击表头排序。完整明细仍见 Excel 工作簿。"
+    recommendations = [
+        row
+        for row in data["rankings"]["heroes_and_equipment"]["carry_equipment_recommendations"]
+        if row.get("has_equipment_data")
+    ]
+    headers = [
+        ("棋子", "text"),
+        ("费用", "numeric"),
+        ("羁绊", "text"),
+        ("主C样本", "numeric"),
+        ("主C率", "numeric"),
+        ("推荐装备", "text"),
+        ("常见三件套", "text"),
+        ("低样本观察", "text"),
+    ]
+    table_rows: list[dict[str, Any]] = []
+    for rec in recommendations:
+        hero_stats = rec["hero_stats"]
+        tier = hero_stats.get("tier")
+        traits = rec.get("hero_traits", [])
+        items = rec.get("recommended_items", [])
+        item_html = "".join(
+            f'<span class="item-chip">{esc(item["equipment_name"])} '
+            f'({render_pct(item.get("selected_rate", 0))}核选, n={item["appearances"]})</span>'
+            for item in items[:4]
+        ) or "—"
+        sets = rec.get("recommended_sets", [])
+        set_text = "；".join(set_row["equipment_set"] for set_row in sets[:2]) or "—"
+        low_sample = rec.get("low_sample_observations", [])
+        low_text = "；".join(item["equipment_name"] for item in low_sample[:2]) or "—"
+        search_text = " ".join(
+            [
+                rec["hero_name"],
+                " ".join(traits),
+                " ".join(item["equipment_name"] for item in items),
+                set_text,
+                low_text,
+            ]
+        )
+        table_rows.append(
+            {
+                "tier": tier,
+                "traits": traits,
+                "search_text": search_text,
+                "cells": [
+                    _html_table_cell(rec["hero_name"], sort_value=rec["hero_name"]),
+                    _html_table_cell(str(tier or "—"), sort_value=tier or 99),
+                    _html_table_cell("、".join(traits) or "—", sort_value="、".join(traits)),
+                    _html_table_cell(
+                        str(hero_stats.get("carry_appearances", 0)),
+                        sort_value=hero_stats.get("carry_appearances", 0),
+                    ),
+                    _html_table_cell(
+                        render_pct(hero_stats.get("carry_rate", 0)),
+                        sort_value=hero_stats.get("carry_rate", 0),
+                    ),
+                    {"text": "装备", "sort": " ".join(item["equipment_name"] for item in items), "html": f'<div class="item-list">{item_html}</div>'},
+                    _html_table_cell(set_text, sort_value=set_text),
+                    _html_table_cell(low_text, sort_value=low_text),
+                ],
+            }
+        )
+    return html_filterable_equipment_page(
+        title="棋子装备推荐",
+        subtitle=subtitle,
+        note=note,
+        headers=headers,
+        rows=table_rows,
+    )
+
+
+def html_trap_comp_card(comp: dict[str, Any]) -> str:
+    stats = comp["stats"]
+    popularity = comp.get("popularity", {})
+    return f"""
+    <article class="trap-card">
+      <header class="trap-head">
+        <h2>{esc(comp['label'])}</h2>
+        <span class="trap-badge">版本陷阱</span>
+      </header>
+      <p class="trap-reason">{esc(comp.get('trap_reason', '策略整体表现偏弱'))}</p>
+      <div class="metrics">
+        <b>Avg {stats['avg_rank']:.2f}</b>
+        <b>Top4 {render_pct(stats['top4_rate'])}</b>
+        <b>n={stats['appearances']}</b>
+        <b>热度 {render_pct(popularity.get('pick_rate', 0))}</b>
+        <b>{esc(comp.get('confidence', '—'))}置信</b>
+      </div>
+      <p><strong>类型：</strong>{esc(comp.get('play_style', '高费'))}</p>
+      <p><strong>路线：</strong>{esc(unique_route_bonds(comp))}</p>
+      <div class="board-section">
+        <h3>7 / 8 / 9 级观察阵容</h3>
+        {html_variant_board_cards(comp)}
+      </div>
+    </article>
+    """
+
+
+def render_trap_compositions_html(data: dict[str, Any]) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    traps = data["rankings"].get("traps", {}).get("compositions", [])
+    cards_html = "".join(html_trap_comp_card(comp) for comp in traps) or '<p class="empty">暂无稳定陷阱阵容。</p>'
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>版本陷阱阵容</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: #10131f;
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: #f8fafc;
+    }}
+    .poster {{
+      width: 1080px;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 36px 32px 42px;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(248,113,113,.18), transparent 24%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.18), transparent 20%),
+        linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
+    }}
+    header {{ margin-bottom: 18px; }}
+    .eyebrow {{ color: #fca5a5; font-weight: 800; letter-spacing: 4px; font-size: 14px; }}
+    h1 {{ font-size: 40px; margin: 8px 0; line-height: 1.1; }}
+    .sub {{ color: #cbd5e1; font-size: 18px; line-height: 1.45; }}
+    .trap-list {{ display: flex; flex-direction: column; gap: 18px; }}
+    .trap-card {{
+      background: rgba(255,255,255,.09);
+      border: 1px solid rgba(248,113,113,.24);
+      border-radius: 28px;
+      padding: 22px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.24);
+    }}
+    .trap-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }}
+    h2 {{ margin: 0; font-size: 28px; line-height: 1.2; overflow-wrap: anywhere; }}
+    .trap-badge {{
+      background: rgba(248,113,113,.22);
+      color: #fecaca;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }}
+    .trap-reason {{ color: #fecaca; margin: 10px 0; line-height: 1.45; }}
+    .metrics {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; color: #bfdbfe; }}
+    p {{ margin: 7px 0; color: #dbeafe; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }}
+    .board-section h3 {{ margin: 14px 0 10px; color: #fde68a; font-size: 20px; }}
+    .board-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }}
+    .board-card {{
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 18px;
+      padding: 14px;
+      min-height: 210px;
+    }}
+    .board-head {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }}
+    .level-badge, .source-badge, .conf-badge, .sample-badge {{
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .level-badge {{ background: rgba(251,191,36,.22); color: #fde68a; }}
+    .source-badge {{ background: rgba(147,197,253,.18); color: #bfdbfe; }}
+    .conf-badge {{ background: rgba(255,255,255,.08); color: #cbd5e1; }}
+    .sample-badge {{ background: rgba(248,113,113,.18); color: #fecaca; }}
+    .bond-note {{ color: #cbd5e1; font-size: 13px; line-height: 1.4; min-height: 38px; }}
+    .hero-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .hero-chip {{
+      background: rgba(255,255,255,.08);
+      border-radius: 10px;
+      padding: 4px 8px;
+      font-size: 13px;
+      color: #fef3c7;
+      line-height: 1.3;
+    }}
+    .empty, .muted {{ color: #94a3b8; }}
+    footer {{ margin-top: 18px; color: #94a3b8; font-size: 14px; text-align: center; }}
+    @media (max-width: 900px) {{
+      .board-grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+<main class="poster">
+  <header>
+    <div class="eyebrow">DZPPQ TRAP COMPS</div>
+    <h1>版本陷阱阵容</h1>
+    <div class="sub">{esc(subtitle)} · 每个陷阱阵容展示 7/8/9 级观察阵容</div>
+  </header>
+  <div class="trap-list">
+    {cards_html}
+  </div>
+  <footer>{esc(generated)}</footer>
+</main>
+</body>
+</html>
+"""
+
+
+def render_table_html_outputs(data: dict[str, Any]) -> dict[str, str]:
+    return {
+        "cards_cai": render_card_prefix_table_html(data, "彩"),
+        "cards_yellow": render_card_prefix_table_html(data, "黄"),
+        "cards_blue": render_card_prefix_table_html(data, "蓝"),
+        "cards_white": render_card_prefix_table_html(data, "白"),
+        "duo_compositions": render_duo_composition_table_html(data),
+        "low_cost_carries": render_low_cost_carry_table_html(data),
+        "composition_recommendations": render_composition_recommendations_html(data),
+        "jiujiu_comps": render_jiujiu_comps_table_html(data),
+        "jiujiu_wearers": render_jiujiu_wearers_table_html(data),
+        "equipment": render_equipment_recommendations_html(data),
+        "trap_compositions": render_trap_compositions_html(data),
+    }
 
 
 def render_html(data: dict[str, Any]) -> str:
@@ -3421,20 +5072,91 @@ def write_outputs(
     md_path: Path,
     html_path: Path,
     xlsx_path: Path,
+    *,
+    card_html_paths: dict[str, Path] | None = None,
+    duo_html_path: Path | None = None,
+    low_cost_html_path: Path | None = None,
+    comp_recommendations_html_path: Path | None = None,
+    jiujiu_comps_html_path: Path | None = None,
+    jiujiu_wearers_html_path: Path | None = None,
+    equipment_html_path: Path | None = None,
+    trap_compositions_html_path: Path | None = None,
 ) -> None:
+    card_html_paths = card_html_paths or DEFAULT_CARD_HTML_PATHS
+    duo_html_path = duo_html_path or DEFAULT_DUO_HTML
+    low_cost_html_path = low_cost_html_path or DEFAULT_LOW_COST_HTML
+    comp_recommendations_html_path = (
+        comp_recommendations_html_path or DEFAULT_COMP_RECOMMENDATIONS_HTML
+    )
+    jiujiu_comps_html_path = jiujiu_comps_html_path or DEFAULT_JIUJIU_COMPS_HTML
+    jiujiu_wearers_html_path = jiujiu_wearers_html_path or DEFAULT_JIUJIU_WEARERS_HTML
+    equipment_html_path = equipment_html_path or DEFAULT_EQUIPMENT_HTML
+    trap_compositions_html_path = (
+        trap_compositions_html_path or DEFAULT_TRAP_COMPOSITIONS_HTML
+    )
+
     json_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.parent.mkdir(parents=True, exist_ok=True)
+    duo_html_path.parent.mkdir(parents=True, exist_ok=True)
+    low_cost_html_path.parent.mkdir(parents=True, exist_ok=True)
+    comp_recommendations_html_path.parent.mkdir(parents=True, exist_ok=True)
+    jiujiu_comps_html_path.parent.mkdir(parents=True, exist_ok=True)
+    jiujiu_wearers_html_path.parent.mkdir(parents=True, exist_ok=True)
+    equipment_html_path.parent.mkdir(parents=True, exist_ok=True)
+    trap_compositions_html_path.parent.mkdir(parents=True, exist_ok=True)
+    for path in card_html_paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    table_html_outputs = render_table_html_outputs(data)
+    card_output_keys = {
+        "彩": "cards_cai",
+        "黄": "cards_yellow",
+        "蓝": "cards_blue",
+        "白": "cards_white",
+    }
     data["outputs"] = {
         "equipment_xlsx": rel(xlsx_path),
         "json": rel(json_path),
         "markdown": rel(md_path),
         "html": rel(html_path),
+        "cards_html": {
+            prefix: rel(card_html_paths[prefix]) for prefix in CARD_HTML_SUFFIXES
+        },
+        "duo_compositions_html": rel(duo_html_path),
+        "low_cost_carries_html": rel(low_cost_html_path),
+        "composition_recommendations_html": rel(comp_recommendations_html_path),
+        "jiujiu_comps_html": rel(jiujiu_comps_html_path),
+        "jiujiu_wearers_html": rel(jiujiu_wearers_html_path),
+        "equipment_html": rel(equipment_html_path),
+        "trap_compositions_html": rel(trap_compositions_html_path),
     }
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     md_path.write_text(render_md(data), encoding="utf-8")
     html_path.write_text(render_html(data), encoding="utf-8")
     render_xlsx(data, xlsx_path)
+
+    for prefix, output_key in card_output_keys.items():
+        card_html_paths[prefix].write_text(
+            table_html_outputs[output_key],
+            encoding="utf-8",
+        )
+    duo_html_path.write_text(table_html_outputs["duo_compositions"], encoding="utf-8")
+    low_cost_html_path.write_text(table_html_outputs["low_cost_carries"], encoding="utf-8")
+    comp_recommendations_html_path.write_text(
+        table_html_outputs["composition_recommendations"],
+        encoding="utf-8",
+    )
+    jiujiu_comps_html_path.write_text(table_html_outputs["jiujiu_comps"], encoding="utf-8")
+    jiujiu_wearers_html_path.write_text(
+        table_html_outputs["jiujiu_wearers"],
+        encoding="utf-8",
+    )
+    equipment_html_path.write_text(table_html_outputs["equipment"], encoding="utf-8")
+    trap_compositions_html_path.write_text(
+        table_html_outputs["trap_compositions"],
+        encoding="utf-8",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3444,6 +5166,72 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--md", type=Path, default=DEFAULT_MD, help="Markdown output path")
     parser.add_argument("--html", type=Path, default=DEFAULT_HTML, help="HTML poster output path")
     parser.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX, help="Excel equipment output path")
+    parser.add_argument(
+        "--cards-html-cai",
+        type=Path,
+        default=DEFAULT_CARD_HTML_PATHS["彩"],
+        help="HTML output path for 彩类单卡排名",
+    )
+    parser.add_argument(
+        "--cards-html-yellow",
+        type=Path,
+        default=DEFAULT_CARD_HTML_PATHS["黄"],
+        help="HTML output path for 黄类单卡排名",
+    )
+    parser.add_argument(
+        "--cards-html-blue",
+        type=Path,
+        default=DEFAULT_CARD_HTML_PATHS["蓝"],
+        help="HTML output path for 蓝类单卡排名",
+    )
+    parser.add_argument(
+        "--cards-html-white",
+        type=Path,
+        default=DEFAULT_CARD_HTML_PATHS["白"],
+        help="HTML output path for 白类单卡排名",
+    )
+    parser.add_argument(
+        "--duo-html",
+        type=Path,
+        default=DEFAULT_DUO_HTML,
+        help="HTML output path for duo composition synergy",
+    )
+    parser.add_argument(
+        "--low-cost-html",
+        type=Path,
+        default=DEFAULT_LOW_COST_HTML,
+        help="HTML output path for low-cost carry popularity",
+    )
+    parser.add_argument(
+        "--compositions-html",
+        type=Path,
+        default=DEFAULT_COMP_RECOMMENDATIONS_HTML,
+        help="HTML output path for paginated composition recommendations",
+    )
+    parser.add_argument(
+        "--jiujiu-comps-html",
+        type=Path,
+        default=DEFAULT_JIUJIU_COMPS_HTML,
+        help="HTML output path for jiujiu-dependent composition table",
+    )
+    parser.add_argument(
+        "--jiujiu-wearers-html",
+        type=Path,
+        default=DEFAULT_JIUJIU_WEARERS_HTML,
+        help="HTML output path for jiujiu wearer recommendations",
+    )
+    parser.add_argument(
+        "--equipment-html",
+        type=Path,
+        default=DEFAULT_EQUIPMENT_HTML,
+        help="HTML output path for filterable hero equipment recommendations",
+    )
+    parser.add_argument(
+        "--trap-compositions-html",
+        type=Path,
+        default=DEFAULT_TRAP_COMPOSITIONS_HTML,
+        help="HTML output path for trap composition detail pages",
+    )
     parser.add_argument("--balance-notes", type=Path, default=None, help="Optional balance notes file")
     parser.add_argument("--min-comp-apps", type=int, default=5)
     parser.add_argument("--min-entity-apps", type=int, default=10)
@@ -3451,18 +5239,58 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_output_path(path: Path) -> Path:
+    return path if path.is_absolute() else ROOT / path
+
+
 def main() -> None:
     args = build_parser().parse_args()
     data = build_analysis(args)
-    json_path = args.json if args.json.is_absolute() else ROOT / args.json
-    md_path = args.md if args.md.is_absolute() else ROOT / args.md
-    html_path = args.html if args.html.is_absolute() else ROOT / args.html
-    xlsx_path = args.xlsx if args.xlsx.is_absolute() else ROOT / args.xlsx
-    write_outputs(data, json_path, md_path, html_path, xlsx_path)
+    json_path = resolve_output_path(args.json)
+    md_path = resolve_output_path(args.md)
+    html_path = resolve_output_path(args.html)
+    xlsx_path = resolve_output_path(args.xlsx)
+    card_html_paths = {
+        "彩": resolve_output_path(args.cards_html_cai),
+        "黄": resolve_output_path(args.cards_html_yellow),
+        "蓝": resolve_output_path(args.cards_html_blue),
+        "白": resolve_output_path(args.cards_html_white),
+    }
+    duo_html_path = resolve_output_path(args.duo_html)
+    low_cost_html_path = resolve_output_path(args.low_cost_html)
+    comp_recommendations_html_path = resolve_output_path(args.compositions_html)
+    jiujiu_comps_html_path = resolve_output_path(args.jiujiu_comps_html)
+    jiujiu_wearers_html_path = resolve_output_path(args.jiujiu_wearers_html)
+    equipment_html_path = resolve_output_path(args.equipment_html)
+    trap_compositions_html_path = resolve_output_path(args.trap_compositions_html)
+    write_outputs(
+        data,
+        json_path,
+        md_path,
+        html_path,
+        xlsx_path,
+        card_html_paths=card_html_paths,
+        duo_html_path=duo_html_path,
+        low_cost_html_path=low_cost_html_path,
+        comp_recommendations_html_path=comp_recommendations_html_path,
+        jiujiu_comps_html_path=jiujiu_comps_html_path,
+        jiujiu_wearers_html_path=jiujiu_wearers_html_path,
+        equipment_html_path=equipment_html_path,
+        trap_compositions_html_path=trap_compositions_html_path,
+    )
     print(f"Wrote {rel(json_path)}")
     print(f"Wrote {rel(md_path)}")
     print(f"Wrote {rel(html_path)}")
     print(f"Wrote {rel(xlsx_path)}")
+    for prefix in CARD_HTML_SUFFIXES:
+        print(f"Wrote {rel(card_html_paths[prefix])}")
+    print(f"Wrote {rel(duo_html_path)}")
+    print(f"Wrote {rel(low_cost_html_path)}")
+    print(f"Wrote {rel(comp_recommendations_html_path)}")
+    print(f"Wrote {rel(jiujiu_comps_html_path)}")
+    print(f"Wrote {rel(jiujiu_wearers_html_path)}")
+    print(f"Wrote {rel(equipment_html_path)}")
+    print(f"Wrote {rel(trap_compositions_html_path)}")
 
 
 if __name__ == "__main__":

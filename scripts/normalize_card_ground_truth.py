@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Normalize legacy card names in match ground truth JSON."""
+"""Normalize legacy card names in match ground truth JSON and SQLite DB."""
 
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
@@ -35,6 +36,14 @@ LEGACY_CARD_LABELS = frozenset(
         "最强支援",
         "福袋·蓝",
         "有钱同享",
+        "法力专注",
+        "快速成型",
+        "吸吸宝pro",
+        "蓝·开攒",
+        "蓝·大亨",
+        "蓝·一起刷刷刷",
+        "蓝·天降啾啾pro",
+        "蓝·重质拍档支援",
     }
 )
 
@@ -55,6 +64,46 @@ def normalize_ground_truth(data: dict) -> Counter:
                     changes[f"{old_name} -> {new_name}"] += 1
                     card["card_name"] = new_name
     return changes
+
+
+def normalize_match_db(db_path: Path) -> Counter:
+    changes: Counter = Counter()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT c.id, c.card_name, c.slot_index, c.player_id
+        FROM cards c
+        """
+    ).fetchall()
+    for row in rows:
+        hero_rows = conn.execute(
+            "SELECT stars FROM heroes WHERE player_id = ?",
+            (int(row["player_id"]),),
+        ).fetchall()
+        heroes = [{"stars": int(hero_row["stars"] or 0)} for hero_row in hero_rows]
+        old_name = str(row["card_name"])
+        new_name = resolve_card_label(old_name, int(row["slot_index"]), heroes)
+        if new_name != old_name:
+            changes[f"{old_name} -> {new_name}"] += 1
+            conn.execute(
+                "UPDATE cards SET card_name = ? WHERE id = ?",
+                (new_name, int(row["id"])),
+            )
+    conn.commit()
+    conn.close()
+    return changes
+
+
+def command_normalize_db(args: argparse.Namespace) -> None:
+    changes = normalize_match_db(args.db)
+    if not changes:
+        print(f"No card name changes needed in {args.db}")
+        return
+    print(f"Updated {args.db}")
+    print("Card name replacements:")
+    for key, count in sorted(changes.items()):
+        print(f"  {key}: {count}")
 
 
 def command_normalize(args: argparse.Namespace) -> None:
@@ -102,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = subparsers.add_parser("check", help="Fail if legacy card labels remain")
     check.set_defaults(func=command_check)
+
+    normalize_db = subparsers.add_parser("normalize-db", help="Rewrite card names in SQLite DB")
+    normalize_db.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite match database path",
+    )
+    normalize_db.set_defaults(func=command_normalize_db)
     return parser
 
 

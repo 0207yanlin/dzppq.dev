@@ -1,0 +1,607 @@
+# -*- coding: utf-8 -*-
+"""Unit tests for adb_capture parsing helpers."""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.adb_capture import (  # noqa: E402
+    AdbClient,
+    EXPECTED_SCREENSHOT_SIZE,
+    EXPECTED_WM_SIZE,
+    RankingEntry,
+    SWIPE_RANKING_ONE_PLAYER,
+    all_dates_before_target,
+    build_next_rank_spec,
+    build_scroll_player_specs_from_entries,
+    compute_next_target_rank,
+    extract_match_entries,
+    extract_ranking_entries,
+    extract_visible_match_dates,
+    filter_new_match_entries,
+    has_target_date_on_page,
+    is_before_target_date,
+    is_partial_rank_ocr,
+    make_global_match_id,
+    make_match_dedup_key,
+    make_mumu_filename,
+    normalize_match_datetime,
+    normalize_match_duration,
+    page_date_summary,
+    page_has_before_target_date,
+    parse_capture_entry_date,
+    parse_capture_target_date,
+    parse_visible_ranks,
+    parse_ranking_entry_rank,
+    parse_wm_size_output,
+    should_exit_before_target_after_today_done,
+)
+
+
+def test_normalize_match_datetime_variants() -> None:
+    assert normalize_match_datetime("07-04 00:52") == "07-04 00:52"
+    assert normalize_match_datetime("07-0400:52") == "07-04 00:52"
+    assert normalize_match_datetime("07-04  00:52") == "07-04 00:52"
+
+
+def test_normalize_match_duration_variants() -> None:
+    assert normalize_match_duration("32:09") == "32:09"
+    assert normalize_match_duration("32：09") == "32:09"
+    assert normalize_match_duration("时长32:09") == "32:09"
+    assert normalize_match_duration("3:9") == "03:09"
+
+
+def test_make_global_match_id() -> None:
+    a = make_global_match_id("07-05 12:42", "32:09")
+    b = make_global_match_id("07-05 12:42", "32:09")
+    assert a == b == "07-05 12:42|32:09"
+
+
+def test_parse_visible_ranks() -> None:
+    assert parse_visible_ranks("4 5") == [4, 5]
+    assert parse_visible_ranks("45") == [4, 5]
+    assert parse_visible_ranks("第4第5") == [4, 5]
+    assert parse_visible_ranks("10 11") == [10, 11]
+
+
+def test_extract_match_entries_pairs_duo_peak_and_time() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-0400:52", "score": 0.98, "box": quad(90)},
+        {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-04 01:10", "score": 0.98, "box": quad(210)},
+    ]
+    entries = extract_match_entries(details, roi, rank=4, player_index=1)
+    assert len(entries) == 2
+    assert entries[0].normalized_datetime == "07-04 00:52"
+    assert entries[0].duo_peak_y == 562
+    assert entries[0].time_y == 592
+    assert entries[0].tap_y == 577
+    assert entries[1].normalized_datetime == "07-04 01:10"
+    assert entries[0].dedup_key != entries[1].dedup_key
+
+
+def test_party_page_date_scan_without_duo_peak() -> None:
+    details = [
+        {"text": "07-05 12:42", "score": 0.99, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+        {"text": "07-04 22:45", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    assert has_target_date_on_page(details, "07-05") is True
+    assert all_dates_before_target(details, "07-05", year=2026) is False
+    summary = page_date_summary(details, "07-05", year=2026)
+    assert summary.today_dates == ["07-05 12:42"]
+    assert summary.before_target_dates == ["07-04 22:45"]
+    assert page_has_before_target_date(details, "07-05", year=2026) is True
+
+    old_only = [
+        {"text": "07-04 22:45", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+        {"text": "07-03 18:00", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    assert all_dates_before_target(old_only, "07-05", year=2026) is True
+    assert extract_visible_match_dates(old_only) == ["07-04 22:45", "07-03 18:00"]
+    assert page_has_before_target_date(old_only, "07-05", year=2026) is True
+
+
+def test_cross_year_capture_date_resolution() -> None:
+    new_year_ref = datetime(2027, 1, 1)
+
+    assert parse_capture_target_date(
+        "12-31",
+        reference=new_year_ref,
+    ) == datetime(2026, 12, 31).date()
+    assert parse_capture_entry_date(
+        "01-01",
+        "12-31",
+        reference=new_year_ref,
+    ) == datetime(2027, 1, 1).date()
+    assert parse_capture_entry_date(
+        "12-30",
+        "12-31",
+        reference=new_year_ref,
+    ) == datetime(2026, 12, 30).date()
+
+    assert is_before_target_date("12-30", "12-31", reference=new_year_ref) is True
+    assert is_before_target_date("01-01", "12-31", reference=new_year_ref) is False
+    assert is_before_target_date("12-31", "12-31", reference=new_year_ref) is False
+
+    new_year_only = [
+        {"text": "01-01 00:52", "score": 0.99, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+        {"text": "01-01 01:10", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    assert all_dates_before_target(new_year_only, "12-31", reference=new_year_ref) is False
+
+    old_year_only = [
+        {"text": "12-30 22:45", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+        {"text": "12-29 18:00", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    assert all_dates_before_target(old_year_only, "12-31", reference=new_year_ref) is True
+
+    mixed_cross_year = [
+        {"text": "01-01 00:52", "score": 0.99, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+        {"text": "12-30 22:45", "score": 0.98, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    summary = page_date_summary(mixed_cross_year, "12-31", reference=new_year_ref)
+    assert summary.today_dates == []
+    assert summary.before_target_dates == ["12-30 22:45"]
+    assert "01-01 00:52" not in summary.before_target_dates
+
+
+def test_same_year_backfill_date_resolution() -> None:
+    run_ref = datetime(2026, 7, 6)
+
+    assert parse_capture_target_date("07-05", reference=run_ref) == datetime(2026, 7, 5).date()
+    assert parse_capture_entry_date("07-06", "07-05", reference=run_ref) == datetime(
+        2026, 7, 6
+    ).date()
+    assert parse_capture_entry_date("07-04", "07-05", reference=run_ref) == datetime(
+        2026, 7, 4
+    ).date()
+
+    assert is_before_target_date("07-04", "07-05", reference=run_ref) is True
+    assert is_before_target_date("07-06", "07-05", reference=run_ref) is False
+
+    future_only = [
+        {"text": "07-06 00:52", "score": 0.99, "box": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    ]
+    assert all_dates_before_target(future_only, "07-05", reference=run_ref) is False
+
+
+def test_should_exit_before_target_after_today_done() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    mixed_details = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
+    ]
+    entries = extract_match_entries(mixed_details, roi, rank=3, player_index=1)
+    summary = page_date_summary(mixed_details, "07-05", year=2026)
+    seen: set[str] = set()
+    processed: set[str] = set()
+
+    assert should_exit_before_target_after_today_done(
+        summary, entries, "07-05", seen, processed
+    ) is False
+
+    seen.add(entries[0].dedup_key)
+    processed.add(entries[0].dedup_key)
+    assert should_exit_before_target_after_today_done(
+        summary, entries, "07-05", seen, processed
+    ) is True
+
+    today_only_details = [
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
+    ]
+    today_summary = page_date_summary(today_only_details, "07-05", year=2026)
+    assert should_exit_before_target_after_today_done(
+        today_summary, [], "07-05", set(), set()
+    ) is False
+
+
+def test_dedup_key_stable_for_y_jitter() -> None:
+    key_a = make_match_dedup_key(4, 1, "07-04 00:52", 562)
+    key_b = make_match_dedup_key(4, 1, "07-04 00:52", 565)
+    assert key_a == key_b
+
+
+def test_resolution_constants() -> None:
+    assert EXPECTED_WM_SIZE == (1600, 2160)
+    assert EXPECTED_SCREENSHOT_SIZE == (2160, 1600)
+
+
+def test_extract_ranking_entries_with_screen_coordinates() -> None:
+    roi = (500, 850, 600, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "4", "score": 0.99, "box": quad(20)},
+        {"text": "5", "score": 0.99, "box": quad(120)},
+    ]
+    entries = extract_ranking_entries(details, roi)
+    assert len(entries) == 2
+    assert entries[0].rank == 4
+    assert entries[0].tap_y == 872
+    assert entries[1].rank == 5
+    assert entries[1].tap_y == 972
+
+
+def test_build_scroll_player_specs_skips_processed_ranks() -> None:
+    entries = [
+        RankingEntry(rank=4, tap_y=933, raw_text="4"),
+        RankingEntry(rank=5, tap_y=1080, raw_text="5"),
+    ]
+    specs, skipped = build_scroll_player_specs_from_entries(
+        entries,
+        next_expected_rank=5,
+        end_rank=100,
+        processed_ranks={4},
+        tap_x=700,
+    )
+    assert specs == [(5, 1, 700, 1080)]
+    assert skipped == []
+
+
+def test_build_next_rank_spec_marks_duplicate_visible_rank() -> None:
+    entries = [RankingEntry(rank=4, tap_y=933, raw_text="4")]
+    specs, skipped, wait_reason = build_next_rank_spec(
+        entries,
+        next_target_rank=4,
+        end_rank=100,
+        processed_ranks={4},
+        tap_x=700,
+    )
+    assert specs == []
+    assert skipped == [(4, "duplicate_rank_visible_after_swipe")]
+    assert wait_reason is None
+
+
+def test_build_scroll_player_specs_uses_ocr_tap_y() -> None:
+    entries = [
+        RankingEntry(rank=6, tap_y=950, raw_text="6"),
+        RankingEntry(rank=7, tap_y=1105, raw_text="7"),
+    ]
+    specs, skipped = build_scroll_player_specs_from_entries(
+        entries,
+        next_expected_rank=6,
+        end_rank=100,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == [(6, 1, 700, 950)]
+    assert skipped == []
+
+
+def test_filter_new_match_entries_skips_duplicate_start_time() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    page_one = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+    ]
+    page_two = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(210)},
+    ]
+    first_entries = extract_match_entries(page_one, roi, rank=3, player_index=1)
+    second_entries = extract_match_entries(page_two, roi, rank=3, player_index=1)
+    assert first_entries[0].dedup_key != second_entries[0].dedup_key
+
+    seen_start_times = {first_entries[0].normalized_datetime}
+    filtered = filter_new_match_entries(
+        second_entries,
+        set(),
+        set(),
+        seen_start_times,
+    )
+    assert filtered == []
+
+
+def test_should_exit_before_target_respects_start_times() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    mixed_details = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
+    ]
+    entries = extract_match_entries(mixed_details, roi, rank=3, player_index=1)
+    summary = page_date_summary(mixed_details, "07-05", year=2026)
+    seen: set[str] = set()
+    processed: set[str] = set()
+    start_times = {entries[0].normalized_datetime}
+
+    assert should_exit_before_target_after_today_done(
+        summary, entries, "07-05", seen, processed, start_times
+    ) is True
+
+
+def test_parse_ranking_entry_rank_two_digit() -> None:
+    assert parse_ranking_entry_rank("12") == 12
+    assert parse_ranking_entry_rank("13") == 13
+    assert parse_ranking_entry_rank("第12") == 12
+    assert parse_ranking_entry_rank("12.") == 12
+    assert parse_ranking_entry_rank("45") == 45
+
+
+def test_parse_ranking_entry_rank_differs_from_visible_ranks_split() -> None:
+    assert parse_visible_ranks("45") == [4, 5]
+    assert parse_ranking_entry_rank("45") == 45
+
+
+def test_extract_ranking_entries_parses_two_digit_ranks() -> None:
+    roi = (500, 850, 600, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "12", "score": 0.99, "box": quad(20)},
+        {"text": "13", "score": 0.99, "box": quad(120)},
+    ]
+    entries = extract_ranking_entries(details, roi)
+    assert [entry.rank for entry in entries] == [12, 13]
+    assert entries[0].tap_y == 872
+    assert entries[1].tap_y == 972
+
+
+def test_build_scroll_player_specs_for_rank_12_and_13() -> None:
+    entries = [
+        RankingEntry(rank=12, tap_y=875, raw_text="12"),
+        RankingEntry(rank=13, tap_y=1026, raw_text="13"),
+    ]
+    specs, skipped = build_scroll_player_specs_from_entries(
+        entries,
+        next_expected_rank=12,
+        end_rank=20,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == [(12, 1, 700, 875)]
+    assert skipped == []
+
+
+def test_swipe_ranking_one_player_constant() -> None:
+    assert SWIPE_RANKING_ONE_PLAYER == (1000, 1000, 1000, 870, 500)
+
+
+def test_build_next_rank_spec_rejects_jump_to_larger_rank() -> None:
+    entries = [
+        RankingEntry(rank=18, tap_y=900, raw_text="18"),
+        RankingEntry(rank=9, tap_y=1000, raw_text="9"),
+    ]
+    specs, skipped, wait_reason = build_next_rank_spec(
+        entries,
+        next_target_rank=17,
+        end_rank=100,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == []
+    assert skipped == []
+    assert wait_reason == "ranking_missing_expected_rank"
+
+
+def test_build_next_rank_spec_ignores_partial_rank_ocr() -> None:
+    entries = [
+        RankingEntry(rank=18, tap_y=900, raw_text="18"),
+        RankingEntry(rank=9, tap_y=1000, raw_text="9"),
+    ]
+    specs, skipped, wait_reason = build_next_rank_spec(
+        entries,
+        next_target_rank=19,
+        end_rank=100,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == []
+    assert skipped == []
+    assert wait_reason == "ranking_partial_rank_ocr"
+    assert is_partial_rank_ocr(9, 19) is True
+
+
+def test_compute_next_target_rank_skips_manual_and_completed() -> None:
+    assert compute_next_target_rank(
+        1,
+        20,
+        completed_ranks={1, 2, 3, 4, 5, 6},
+        skipped_ranks={8},
+        manual_skip_ranks={7, 9},
+    ) == 10
+
+
+def test_capture_state_resume_and_preload_match_ids() -> None:
+    from scripts.capture_daily_screenshots import CaptureState, DailyCaptureBot, CaptureConfig
+
+    state = CaptureState.new(
+        run_id="20260705-120000",
+        target_date="07-05",
+        start_rank=1,
+        end_rank=20,
+    )
+    for rank in range(1, 17):
+        state.set_rank_status(rank, "completed")
+        record = state.get_rank_record(rank)
+        record["match_ids"] = [f"07-05 12:{rank:02d}|32:09"]
+    state.set_rank_status(17, "pending")
+
+    config = CaptureConfig(
+        output_dir=ROOT / "screenshots.test",
+        start_rank=1,
+        end_rank=20,
+        resume=True,
+    )
+    bot = DailyCaptureBot(config)
+    bot.capture_state = state
+    bot.run_id = state.run_id
+    bot.preload_from_state()
+
+    assert bot._next_expected_rank == 17
+    assert 16 in bot._processed_player_ranks
+    assert 17 not in bot._processed_player_ranks
+    assert "07-05 12:16|32:09" in bot._processed_match_ids
+
+
+def test_output_isolation_run_dirs() -> None:
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+
+    config = CaptureConfig(output_dir=ROOT / "screenshots.test")
+    bot = DailyCaptureBot(config)
+    bot.run_id = "run_a"
+    bot.run_dir = config.output_dir / "runs" / bot.run_id
+    assert bot.debug_matches_dir == config.output_dir / "runs" / "run_a" / "debug_matches"
+    assert bot.debug_players_dir == config.output_dir / "runs" / "run_a" / "debug_players"
+
+
+def test_load_manual_skip_ranks() -> None:
+    from scripts.capture_daily_screenshots import load_manual_skip_ranks
+
+    skip_path = ROOT / "data" / "capture_skip_players.json"
+    assert load_manual_skip_ranks(skip_path) == set()
+    skip_path.write_text("[9, 11, 13, 15]", encoding="utf-8")
+    try:
+        assert load_manual_skip_ranks(skip_path) == {9, 11, 13, 15}
+    finally:
+        skip_path.write_text("[]", encoding="utf-8")
+
+
+def test_mumu_filename_format() -> None:
+    from datetime import datetime
+
+    name = make_mumu_filename(datetime(2026, 7, 4, 23, 51, 48, 537000))
+    assert name == "MuMu-20260704-235148-537.png"
+
+
+def test_parse_wm_size_output() -> None:
+    assert parse_wm_size_output("Physical size: 1600x2160") == (1600, 2160)
+    assert parse_wm_size_output("Override size: 2160x1600") == (2160, 1600)
+    assert parse_wm_size_output("error: closed") is None
+
+
+def test_check_device_falls_back_when_mumu_tcp_closed() -> None:
+    client = AdbClient()
+    probe_results = {
+        "127.0.0.1:16384": (False, "error: closed"),
+        "emulator-5554": (True, "Physical size: 1600x2160"),
+    }
+    client.list_devices = lambda: ["127.0.0.1:16384", "emulator-5554"]  # type: ignore[method-assign]
+    client.probe_device = lambda serial: probe_results[serial]  # type: ignore[method-assign]
+
+    selected = client.check_device()
+
+    assert selected == "emulator-5554"
+    assert client.device_serial == "emulator-5554"
+
+
+def test_check_device_fails_when_preferred_serial_unhealthy() -> None:
+    client = AdbClient()
+    client.list_devices = lambda: ["127.0.0.1:16384", "emulator-5554"]  # type: ignore[method-assign]
+    client.probe_device = lambda serial: (False, "error: closed")  # type: ignore[method-assign]
+
+    try:
+        client.check_device(prefer="127.0.0.1:16384")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "127.0.0.1:16384" in message
+        assert "error: closed" in message
+        assert "--serial" in message
+
+
+def test_check_device_reports_all_failures() -> None:
+    client = AdbClient()
+    client.list_devices = lambda: ["127.0.0.1:16384", "emulator-5554"]  # type: ignore[method-assign]
+    client.probe_device = lambda serial: (False, "error: closed")  # type: ignore[method-assign]
+
+    try:
+        client.check_device()
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "127.0.0.1:16384: error: closed" in message
+        assert "emulator-5554: error: closed" in message
+        assert "No healthy adb device found" in message
+
+
+def test_get_screen_size_error_includes_serial() -> None:
+    import subprocess
+
+    client = AdbClient(device_serial="127.0.0.1:16384")
+
+    class FakeResult:
+        returncode = 1
+        stdout = b""
+        stderr = b"error: closed"
+
+    client.adb_shell = lambda *args, **kwargs: FakeResult()  # type: ignore[method-assign]
+
+    try:
+        client.get_screen_size()
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "wm size failed on 127.0.0.1:16384" in message
+        assert "error: closed" in message
+        assert "--serial" in message
+
+
+if __name__ == "__main__":
+    test_normalize_match_datetime_variants()
+    test_normalize_match_duration_variants()
+    test_make_global_match_id()
+    test_parse_visible_ranks()
+    test_extract_match_entries_pairs_duo_peak_and_time()
+    test_party_page_date_scan_without_duo_peak()
+    test_cross_year_capture_date_resolution()
+    test_same_year_backfill_date_resolution()
+    test_should_exit_before_target_after_today_done()
+    test_dedup_key_stable_for_y_jitter()
+    test_extract_ranking_entries_with_screen_coordinates()
+    test_build_scroll_player_specs_skips_processed_ranks()
+    test_build_next_rank_spec_marks_duplicate_visible_rank()
+    test_build_scroll_player_specs_uses_ocr_tap_y()
+    test_parse_ranking_entry_rank_two_digit()
+    test_parse_ranking_entry_rank_differs_from_visible_ranks_split()
+    test_extract_ranking_entries_parses_two_digit_ranks()
+    test_build_scroll_player_specs_for_rank_12_and_13()
+    test_swipe_ranking_one_player_constant()
+    test_build_next_rank_spec_rejects_jump_to_larger_rank()
+    test_build_next_rank_spec_ignores_partial_rank_ocr()
+    test_compute_next_target_rank_skips_manual_and_completed()
+    test_capture_state_resume_and_preload_match_ids()
+    test_output_isolation_run_dirs()
+    test_load_manual_skip_ranks()
+    test_filter_new_match_entries_skips_duplicate_start_time()
+    test_should_exit_before_target_respects_start_times()
+    test_resolution_constants()
+    test_mumu_filename_format()
+    test_parse_wm_size_output()
+    test_check_device_falls_back_when_mumu_tcp_closed()
+    test_check_device_fails_when_preferred_serial_unhealthy()
+    test_check_device_reports_all_failures()
+    test_get_screen_size_error_includes_serial()
+    print("all tests passed")

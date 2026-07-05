@@ -228,6 +228,19 @@ Also write `data/latest_meta_analysis_report.html`:
 - show sample summary, top strategy comps split by `赌狗`/`高费`, mature lineup, deduped transition path, top 3 carry requirements, jiujiu dependency notes, card picks, jiujiu highlights, and structured traps.
 - do not mirror the full Markdown report; keep the HTML concise and visual.
 
+## Interactive HTML Tables And Detail Pages
+
+Also write these standalone HTML files under `data/`:
+
+- `latest_meta_analysis_compositions.html`: paginated comp recommendation pages, one comp per page, with 7/8/9 board cards.
+- `latest_meta_analysis_jiujiu_comps.html`: sortable table for jiujiu-dependent recommended comps.
+- `latest_meta_analysis_jiujiu_wearers.html`: sortable table for recommended jiujiu wearer heroes.
+- `latest_meta_analysis_equipment.html`: filterable hero equipment table with cost/trait/search filters and sortable columns.
+- `latest_meta_analysis_trap_compositions.html`: trap comp detail cards with 7/8/9 observed boards.
+- existing sortable tables: `latest_meta_analysis_cards_{cai,yellow,blue,white}.html`, `latest_meta_analysis_duo_compositions.html`, `latest_meta_analysis_low_cost_carries.html`.
+
+Sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
+
 ## Excel Equipment Output
 
 Also write `data/latest_meta_analysis_equipment.xlsx`:

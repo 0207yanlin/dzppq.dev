@@ -29,6 +29,14 @@ def save_jpg(path: Path, image: np.ndarray, quality: int = 95) -> None:
     path.write_bytes(buf.tobytes())
 
 
+def imread_image(path: Path | str) -> np.ndarray | None:
+    """Read an image file; supports non-ASCII paths on Windows."""
+    buf = np.fromfile(str(path), dtype=np.uint8)
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
 def hero_template_path(hero_label: str, template_dir: Path | None = None) -> Path:
     directory = template_dir or HERO_TEMPLATE_DIR
     return directory / f"{hero_label}.jpg"

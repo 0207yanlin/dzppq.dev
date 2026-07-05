@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from src.card_rules import resolve_card_label
+from src.template_capture import imread_image
 from src.detect_cards import detect_cards, load_template_sigs
 from src.detect_equipment import (
     DEFAULT_CLASSIFIER_PATH,
@@ -377,7 +378,7 @@ class PredictionContext:
         return_timings: bool = False,
     ) -> dict[str, Any]:
         if img is None:
-            img = cv2.imread(str(img_path))
+            img = imread_image(img_path)
         if img is None:
             raise RuntimeError(f"failed to read screenshot: {img_path}")
 

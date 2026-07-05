@@ -26,6 +26,12 @@ Default outputs:
 - `data/latest_meta_analysis_report.md`
 - `data/latest_meta_analysis_report.html`
 - `data/latest_meta_analysis_equipment.xlsx`
+- `data/latest_meta_analysis_compositions.html`
+- `data/latest_meta_analysis_jiujiu_comps.html`
+- `data/latest_meta_analysis_jiujiu_wearers.html`
+- `data/latest_meta_analysis_equipment.html`
+- `data/latest_meta_analysis_trap_compositions.html`
+- sortable card/duo/low-cost HTML tables under `data/latest_meta_analysis_*.html`
 
 Excel export requires `openpyxl`.
 
@@ -65,8 +71,9 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 - `render_md()` writes the full audit report. The recommendation area is split into `赌狗阵容推荐` and `高费阵容推荐`. Per-hero equipment tables are not embedded; they go to Excel.
 - `render_md()` also includes low-cost 3-star carry difficulty, blue-card team-rank view, jiujiu wearer recommendations, and duo composition synergy when enough samples exist.
 - `render_html()` writes a concise 1080px poster. It uses the same split recommendations, not a Markdown-to-HTML conversion, and keeps only compact card/jiujiu/duo highlights.
+- `render_table_html_outputs()` writes sortable/filterable HTML tables and paginated comp/trap detail pages.
 - `render_xlsx()` writes per-hero equipment, comp carry equipment, common 3-item sets, and low-sample observations.
-- HTML should stay visual and compact: sample summary, top comps by style, card picks, jiujiu highlights, traps, and reading caveats.
+- HTML should stay visual and compact for the poster; dedicated HTML pages carry full comp, jiujiu, equipment, and trap detail.
 
 ## Common Edit Areas
 

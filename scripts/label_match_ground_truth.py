@@ -7,8 +7,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import cv2
-
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -30,7 +28,7 @@ from src.match_ground_truth import (  # noqa: E402
     validate_screenshot_entry,
 )
 from src.parse import parse_hero_label  # noqa: E402
-from src.template_capture import capture_missing_templates  # noqa: E402
+from src.template_capture import capture_missing_templates, imread_image  # noqa: E402
 
 
 def resolve_screenshot(path_or_name: str | Path, screenshot_dir: Path) -> Path:
@@ -231,7 +229,7 @@ def label_one_screenshot(
     capture_templates: bool = True,
     force_predict: bool = False,
 ) -> dict:
-    img = cv2.imread(str(img_path))
+    img = imread_image(img_path)
     if img is None:
         raise RuntimeError(f"failed to read screenshot: {img_path}")
 

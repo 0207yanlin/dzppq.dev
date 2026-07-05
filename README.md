@@ -119,6 +119,35 @@ python scripts/suggest_template_candidates.py review --include-rejected
 
 ---
 
+### 2b. 直接裁剪存卡牌模板 — `capture_card_template.py`
+
+从某张截图指定行/列裁剪卡牌图标，写入 `assets/templates/cards/`，**不修改 GT**。支持项目外绝对路径（含中文路径）。
+
+- `--row`：玩家行号，1–8（从上到下）
+- `--col`：卡牌列号，1–3（从左到右）
+- `--name`：模板文件名，如 `黄·法力专注pro`
+- `--overwrite`：覆盖已有同名模板（可选）
+
+#### 外部截图路径（cmd 一行命令）
+
+```cmd
+python scripts\capture_card_template.py "C:\Users\wrlin\Documents\MuMu共享文件夹\Screenshots\MuMu-20260705-161100-934.png" --row 3 --col 2 --name "黄·法力专注pro"
+```
+
+#### 项目内截图
+
+```cmd
+python scripts\capture_card_template.py screenshots.0704\MuMu-20260704-234249-241.png --row 2 --col 1 --name "蓝·新卡名"
+```
+
+存完模板后重新预测以生效：
+
+```cmd
+python scripts\build_match_database.py --predict --force
+```
+
+---
+
 ### 3. 构建对局数据库 — `build_match_database.py`
 
 #### 从已有 GT 导入数据库
@@ -170,3 +199,53 @@ python scripts/build_match_database.py --screenshot-dir screenshots.0703 --path-
 ```
 
 审核通过新模板后，需重新跑 `build_match_database.py --predict --force` 以应用新模板。
+
+---
+
+### 0. 自动截图采集 — `capture_daily_screenshots.py`
+
+通过 ADB 自动遍历排行榜玩家，采集**当天**双人巅峰对局截图。默认采集 rank 1–100，PNG 落盘到 `screenshots.MMDD/`（`MMDD` 为运行日当天日期，如 7 月 5 日 → `screenshots.0705/`）。
+
+#### 全量采集（rank 1–100，落盘 screenshots.MMDD）
+
+MuMu 模拟器需先保证 ADB 已连接：
+
+```powershell
+python scripts/capture_daily_screenshots.py --connect
+```
+
+若本机同时存在多个 ADB 设备，可显式指定 serial：
+
+```powershell
+python scripts/capture_daily_screenshots.py --connect --serial emulator-5554
+```
+
+最简写法（依赖默认 `--start-rank 1 --end-rank 100`，输出目录按当天自动生成）：
+
+```powershell
+python scripts/capture_daily_screenshots.py
+```
+
+#### 指定目标对局日期
+
+采集「7 月 5 日」对局，输出仍落到 `screenshots.0705/`：
+
+```powershell
+python scripts/capture_daily_screenshots.py --connect --date 07-05
+```
+
+#### 跳过不可见玩家 + 断点续跑
+
+手动维护需跳过的 rank（如 `[9, 11, 13, 15]`），写入 `data/capture_skip_players.json`：
+
+```powershell
+python scripts/capture_daily_screenshots.py --connect --skip-players data/capture_skip_players.json --reset-state
+```
+
+中断后续跑（跳过已完成 rank，从 checkpoint 继续）：
+
+```powershell
+python scripts/capture_daily_screenshots.py --connect --skip-players data/capture_skip_players.json --resume
+```
+
+采集完成后，将 `screenshots.MMDD/` 接入下方「新截图批次完整流程」做预测与建库。

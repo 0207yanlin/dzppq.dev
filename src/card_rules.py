@@ -11,6 +11,11 @@ QUALITY_PARTNER_SUPPORT_GROUP = frozenset(
 QUALITY_WEIGHT_PRO_LABEL = "蓝·重质也重量pro"
 QUALITY_PARTNER_SUPPORT_LABEL = "蓝·拍档支援"
 FAST_XXB_GROUP = frozenset({"快速成型", "吸吸宝pro"})
+FAST_XXB_PRO_LABEL = "黄·吸吸宝pro"
+FAST_XXB_LABEL = "黄·快速成型"
+MANA_FOCUS_LABEL = "白·法力专注"
+KZDH_LABEL = "蓝·开攒大亨"
+SSS_LABEL = "蓝·一起刷刷刷+天降啾啾pro"
 
 CARD_LABEL_ALIASES: dict[str, str] = {
     "重质也重量pro": QUALITY_WEIGHT_PRO_LABEL,
@@ -26,6 +31,11 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "守护": "大力巫术守护",
     "福袋·蓝": "福袋有钱",
     "有钱同享": "福袋有钱",
+    "法力专注": MANA_FOCUS_LABEL,
+    "蓝·开攒": KZDH_LABEL,
+    "蓝·大亨": KZDH_LABEL,
+    "蓝·一起刷刷刷": SSS_LABEL,
+    "蓝·天降啾啾pro": SSS_LABEL,
 }
 
 # Map merged template bodies to canonical bodies before context rules run.
@@ -74,9 +84,9 @@ def resolve_card_label(
             return QUALITY_WEIGHT_PRO_LABEL
         return QUALITY_PARTNER_SUPPORT_LABEL
     if slot_index == 1 and body in FAST_XXB_GROUP:
-        return "吸吸宝pro"
+        return FAST_XXB_PRO_LABEL
     if body in FAST_XXB_GROUP:
-        return "快速成型"
+        return FAST_XXB_LABEL
     return label
 
 

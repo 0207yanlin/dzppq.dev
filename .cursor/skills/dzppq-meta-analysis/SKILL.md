@@ -22,10 +22,10 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 
 Use `--db <path>` when the user provides a database. If the user provides balance notes in a file, pass `--balance-notes <path>`.
 
-4. Base the final answer on `data/latest_meta_analysis_report.html`, `data/latest_meta_analysis_report.md`, `data/latest_meta_analysis.json`, and `data/latest_meta_analysis_equipment.xlsx`.
+4. Base the final answer on `data/latest_meta_analysis_report.html`, `data/latest_meta_analysis_report.md`, `data/latest_meta_analysis.json`, `data/latest_meta_analysis_equipment.xlsx`, and the interactive HTML exports listed below.
 5. Mention data quality caveats: sample size, unknown labels, excluded bot records, and low-confidence segments.
 
-Per-hero equipment tables are exported to Excel only; the Markdown report keeps a short carry overview and links to the xlsx file.
+Per-hero equipment tables are exported to Excel and a filterable HTML table; the Markdown report keeps a short carry overview and links to those files.
 
 Do not use older report files as the primary source. Older scripts in `scripts/` and `src/meta_analysis.py` are historical references only unless the user explicitly asks to compare with them.
 
@@ -56,6 +56,10 @@ Write concise Chinese conclusions. Include:
 
 - Separate `赌狗` and `高费` comp recommendations with concrete 7/8/9-level hero lists when data supports them.
 - HTML one-image poster at `data/latest_meta_analysis_report.html` for visual sharing.
+- Paginated comp detail HTML at `data/latest_meta_analysis_compositions.html`.
+- Sortable jiujiu HTML tables at `data/latest_meta_analysis_jiujiu_comps.html` and `data/latest_meta_analysis_jiujiu_wearers.html`.
+- Filterable equipment HTML at `data/latest_meta_analysis_equipment.html`.
+- Trap comp detail HTML at `data/latest_meta_analysis_trap_compositions.html`.
 - Excel equipment workbook at `data/latest_meta_analysis_equipment.xlsx` for per-hero and per-comp equipment detail.
 - Carry analysis for each recommended comp, including top 3 carries with priority.
 - Card strength, with composition-specific notes when sample size allows.
@@ -63,7 +67,7 @@ Write concise Chinese conclusions. Include:
 - Formation difficulty and popularity with overall strength ranking.
 - Low-cost 3-star main-carry difficulty, including same-match demand pressure by hero.
 - Duo composition synergy recommendations based on recomputed team rank.
-- Strong carry heroes overview in Markdown; full equipment recommendations in Excel only.
+- Strong carry heroes overview in Markdown; full equipment recommendations in Excel and filterable HTML.
 - Main carry star requirement (average top4 stars) and key equipment dependency notes for recommended comps.
 - Jiujiu dependency notes when a comp title bond requires `X啾啾`, including recommended wearer heroes.
 - Jiujiu strength ranking and recommended comps for each jiujiu item.
