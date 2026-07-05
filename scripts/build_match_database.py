@@ -12,7 +12,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.match_db import db_summary, import_ground_truth, init_match_db  # noqa: E402
+from src.match_db import (  # noqa: E402
+    DEFAULT_SIMILARITY_THRESHOLD,
+    db_summary,
+    import_ground_truth,
+    init_match_db,
+)
 from src.match_ground_truth import (  # noqa: E402
     DEFAULT_GT_PATH,
     DEFAULT_SCREENSHOT_DIR,
@@ -78,12 +83,31 @@ def command_build(args: argparse.Namespace) -> None:
         gt_data,
         path_prefix=args.path_prefix,
         force=args.force,
+        dedupe_similar=not args.no_dedupe_similar,
+        similarity_threshold=args.similarity_threshold,
+        min_hero_rank=args.min_hero_rank,
+        min_pairs=args.min_pairs,
     )
     summary = db_summary(conn)
     conn.close()
 
     print(f"Database: {db_path}")
-    print(f"Import: inserted={stats['inserted']} skipped={stats['skipped']} replaced={stats['replaced']}")
+    print(
+        "Import: "
+        f"inserted={stats['inserted']} "
+        f"skipped={stats['skipped']} "
+        f"replaced={stats['replaced']} "
+        f"skipped_similar={stats.get('skipped_similar', 0)}"
+    )
+    similar_skips = stats.get("similar_skips") or []
+    for item in similar_skips[:20]:
+        print(
+            "Similar skip: "
+            f"{item['screenshot_name']} -> {item['duplicate_of']} "
+            f"(score={item['score']}, hero={item['hero_rank']})"
+        )
+    if len(similar_skips) > 20:
+        print(f"... and {len(similar_skips) - 20} more similar skips")
     print("Summary:")
     for key, value in summary.items():
         print(f"  {key}: {value}")
@@ -94,7 +118,15 @@ def command_build(args: argparse.Namespace) -> None:
         print(f"Warning: expected {expected_players} players, got {summary['players']}")
     if summary["cards"] != expected_cards:
         print(f"Warning: expected {expected_cards} cards, got {summary['cards']}")
-    if summary["matches"] != png_count and not args.allow_partial:
+    expected_matches = gt_in_dir - stats.get("skipped_similar", 0)
+    if summary["matches"] != expected_matches and not args.allow_partial:
+        print(
+            f"Warning: expected about {expected_matches} unique matches after dedupe "
+            f"(gt_in_dir={gt_in_dir}, skipped_similar={stats.get('skipped_similar', 0)}), "
+            f"got {summary['matches']} "
+            "(use --allow-partial to silence)"
+        )
+    elif summary["matches"] != png_count and not args.allow_partial and args.no_dedupe_similar:
         print(
             f"Warning: expected {png_count} matches, got {summary['matches']} "
             "(use --allow-partial to silence)"
@@ -130,6 +162,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-partial",
         action="store_true",
         help="Do not warn when match count differs from PNG count",
+    )
+    parser.add_argument(
+        "--no-dedupe-similar",
+        action="store_true",
+        help="Disable whole-match similarity deduplication during import",
+    )
+    parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        help="Similarity score threshold for duplicate match detection",
+    )
+    parser.add_argument(
+        "--min-hero-rank",
+        type=float,
+        default=0.82,
+        help="Minimum per-rank hero similarity required for duplicate detection",
+    )
+    parser.add_argument(
+        "--min-pairs",
+        type=float,
+        default=0.99,
+        help="Minimum pairs similarity required for duplicate detection",
     )
     parser.set_defaults(func=command_build)
     return parser
