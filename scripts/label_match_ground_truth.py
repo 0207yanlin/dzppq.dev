@@ -241,6 +241,7 @@ def command_predict(args: argparse.Namespace) -> None:
         ctx,
         workers=args.workers,
         gt_data=gt_data,
+        force_predict=args.force,
         on_progress=(
             (lambda path, _result: progress.advance(path.name))
             if progress is not None
@@ -571,6 +572,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--write",
         action="store_true",
         help="Write predictions into ground truth JSON (unverified)",
+    )
+    predict.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-predict all screenshots, ignoring prediction cache",
     )
     predict.set_defaults(func=command_predict)
 

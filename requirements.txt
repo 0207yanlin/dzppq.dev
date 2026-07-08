@@ -1,0 +1,11 @@
+# Core runtime for dzppq_data_analysis (CPU).
+# Install PyTorch CPU wheels first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+opencv-python>=4.8
+numpy>=2.0
+torch==2.12.1
+torchvision==0.27.1
+pillow>=10
+scikit-learn>=1.9
+joblib>=1.4
+openpyxl>=3.1

@@ -71,6 +71,8 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "彩·法师礼包": CAI_GIFT_PACK_LABEL,
     "彩·射手礼包": CAI_GIFT_PACK_LABEL,
     "彩·战士礼包": CAI_GIFT_PACK_LABEL,
+    "蓝·半步满级": "蓝·半步满级+满级玩家",
+    "蓝·满级玩家": "蓝·半步满级+满级玩家",
 }
 
 # Map merged template bodies to canonical bodies before context rules run.

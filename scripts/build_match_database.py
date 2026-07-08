@@ -37,6 +37,7 @@ def run_batch_predict(
     *,
     quiet: bool = True,
     force: bool = False,
+    workers: int = 1,
 ) -> None:
     cmd = [
         sys.executable,
@@ -45,9 +46,13 @@ def run_batch_predict(
         str(screenshot_dir),
         "--gt",
         str(gt_path),
+        "--workers",
+        str(workers),
     ]
     if quiet:
         cmd.append("--quiet")
+    if force:
+        cmd.append("--force")
     cmd.extend(["predict", "--write"])
     print("Running batch prediction for all screenshots...")
     subprocess.run(cmd, check=True, cwd=str(ROOT))
@@ -64,7 +69,13 @@ def command_build(args: argparse.Namespace) -> None:
         png_count = len(collect_screenshots(screenshot_dir))
         if png_count == 0:
             raise SystemExit(f"No PNG files in {screenshot_dir}")
-        run_batch_predict(screenshot_dir, gt_path, quiet=args.quiet, force=args.force)
+        run_batch_predict(
+            screenshot_dir,
+            gt_path,
+            quiet=args.quiet,
+            force=args.force,
+            workers=args.workers,
+        )
 
     gt_data = load_match_ground_truth(gt_path)
     gt_in_dir = sum(
@@ -174,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Replace existing DB rows / re-predict all screenshots",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers when --predict is used (default: 1)",
     )
     parser.add_argument("--quiet", action="store_true", default=True)
     parser.add_argument(

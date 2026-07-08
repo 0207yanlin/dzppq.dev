@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,10 +18,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.layout import ROOT as PROJECT_ROOT, card_roi, crop_roi, hero_roi  # noqa: E402
-from src.match_ground_truth import (  # noqa: E402
-    DEFAULT_GT_PATH,
-    load_match_ground_truth,
-    save_match_ground_truth,
+from src.detect_cards import (  # noqa: E402
+    DETECTION_PARAMS as CARD_DETECTION_PARAMS,
+    diagnose_card_match,
+    load_template_sigs,
+)
+from src.detect_heroes import (  # noqa: E402
+    DETECTION_PARAMS as HERO_DETECTION_PARAMS,
+    build_hero_template_cache,
+    crop_center,
+    load_templates,
 )
 from src.parse import parse_hero_label  # noqa: E402
 from src.template_capture import (  # noqa: E402
@@ -33,15 +40,37 @@ from src.template_capture import (  # noqa: E402
 
 DEFAULT_CANDIDATES_DIR = PROJECT_ROOT / "data" / "template_candidates"
 DEFAULT_CANDIDATES_JSON = DEFAULT_CANDIDATES_DIR / "candidates.json"
+DEFAULT_GT_PATH = PROJECT_ROOT / "data" / "match_ground_truth.json"
 
 HERO_SCORE_THRESHOLD = 0.75
 CARD_SCORE_THRESHOLD = 0.75
 SIGNATURE_SIZE = (32, 32)
 CLUSTER_DISTANCE = 12.0
+REVIEW_MEMBER_LIMIT = 10
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def load_match_ground_truth(path: Path | None = None) -> dict:
+    gt_path = path or DEFAULT_GT_PATH
+    if not gt_path.exists():
+        return {
+            "version": 1,
+            "description": "Full match ground truth (pairs, heroes, equipment, cards)",
+            "screenshots": {},
+        }
+    return json.loads(gt_path.read_text(encoding="utf-8"))
+
+
+def save_match_ground_truth(data: dict, path: Path | None = None) -> None:
+    gt_path = path or DEFAULT_GT_PATH
+    gt_path.parent.mkdir(parents=True, exist_ok=True)
+    gt_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _candidate_key(kind: str, screenshot: str, player: int, slot: int) -> str:
@@ -86,6 +115,146 @@ def _load_registry(data: dict) -> dict[str, dict]:
         key = _candidate_key(item["kind"], item["screenshot"], item["player"], item["slot"])
         registry[key] = item
     return registry
+
+
+def _normalize_template_label(name: str | None) -> str | None:
+    if not name:
+        return None
+    return name.replace(".jpg", "")
+
+
+class _DiagnosticContext:
+    def __init__(self) -> None:
+        self.card_sigs: dict | None = None
+        self._hero_templates: dict | None = None
+        self._hero_gray_cache: dict[str, np.ndarray] | None = None
+
+    def card_templates(self) -> dict:
+        if self.card_sigs is None:
+            self.card_sigs = load_template_sigs()
+        return self.card_sigs
+
+    def hero_templates(self) -> tuple[dict, dict[str, np.ndarray]]:
+        if self._hero_templates is None:
+            templates = load_templates()
+            self._hero_templates = templates
+            self._hero_gray_cache = build_hero_template_cache(
+                templates,
+                HERO_DETECTION_PARAMS["margin_ratio"],
+            )
+        assert self._hero_gray_cache is not None
+        return self._hero_templates, self._hero_gray_cache
+
+
+def _empty_match_debug(
+    *,
+    threshold: float,
+    min_gap: float,
+    reject_reason: str = "no_templates",
+) -> dict:
+    return {
+        "top1_label": None,
+        "top1_score": 0.0,
+        "top2_label": None,
+        "top2_score": 0.0,
+        "gap": 0.0,
+        "threshold": threshold,
+        "min_gap": min_gap,
+        "gap_threshold": min_gap,
+        "reject_reason": reject_reason,
+    }
+
+
+def _diagnose_card_match(crop: np.ndarray, template_sigs: dict) -> dict:
+    return diagnose_card_match(crop, template_sigs)
+
+
+def _diagnose_hero_match(
+    crop: np.ndarray,
+    templates: dict,
+    template_gray_cache: dict[str, np.ndarray],
+) -> dict:
+    params = HERO_DETECTION_PARAMS
+    threshold = float(params["threshold"])
+    min_gap = float(params["min_gap"])
+    padding = int(params["padding"])
+    margin_ratio = float(params["margin_ratio"])
+
+    roi_gray = crop_center(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), margin_ratio)
+    search = cv2.copyMakeBorder(
+        roi_gray, padding, padding, padding, padding, cv2.BORDER_REPLICATE
+    )
+    scores: list[tuple[float, str]] = []
+    for name in templates:
+        temp_gray = template_gray_cache[name]
+        th, tw = temp_gray.shape
+        if search.shape[0] < th or search.shape[1] < tw:
+            continue
+        res = cv2.matchTemplate(search, temp_gray, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        scores.append((float(max_val), name))
+    scores.sort(reverse=True)
+
+    if not scores:
+        return _empty_match_debug(threshold=threshold, min_gap=min_gap)
+
+    top1_score, top1_name = scores[0]
+    top2_score, top2_name = scores[1] if len(scores) > 1 else (0.0, None)
+    gap = top1_score - top2_score
+
+    if top1_score < threshold:
+        reject_reason = "below_threshold"
+    elif gap < min_gap:
+        reject_reason = "below_min_gap"
+    else:
+        reject_reason = "accepted"
+
+    return {
+        "top1_label": _normalize_template_label(top1_name),
+        "top1_score": top1_score,
+        "top2_label": _normalize_template_label(top2_name),
+        "top2_score": top2_score,
+        "gap": gap,
+        "threshold": threshold,
+        "min_gap": min_gap,
+        "gap_threshold": min_gap,
+        "reject_reason": reject_reason,
+    }
+
+
+def _annotate_match_debug(raw: list[dict], diag: _DiagnosticContext) -> None:
+    card_sigs = diag.card_templates()
+    hero_templates, hero_gray_cache = diag.hero_templates()
+    for item in raw:
+        crop = item.get("crop")
+        if crop is None:
+            continue
+        if item["kind"] == "card":
+            debug = _diagnose_card_match(crop, card_sigs)
+        else:
+            debug = _diagnose_hero_match(crop, hero_templates, hero_gray_cache)
+        if item.get("reason") == "low_score" and item.get("predicted_label") not in {
+            None,
+            "",
+            "unknown",
+        }:
+            debug["reject_reason"] = "accepted_low_score"
+        item["match_debug"] = debug
+
+
+def _serialize_member(member: dict) -> dict:
+    payload = {
+        "screenshot": member["screenshot"],
+        "player": member["player"],
+        "slot": member["slot"],
+        "path": member["path"],
+        "predicted_label": member["predicted_label"],
+        "score": member["score"],
+        "reason": member["reason"],
+    }
+    if member.get("match_debug") is not None:
+        payload["match_debug"] = member["match_debug"]
+    return payload
 
 
 def _collect_raw_candidates(
@@ -209,6 +378,7 @@ def generate_candidates(
         hero_threshold=hero_threshold,
         card_threshold=card_threshold,
     )
+    _annotate_match_debug(raw, _DiagnosticContext())
     clusters = _cluster_candidates(raw)
 
     candidates: list[dict] = []
@@ -240,25 +410,15 @@ def generate_candidates(
                 "slot": rep["slot"],
                 "predicted_label": rep["predicted_label"],
                 "score": rep["score"],
+                "match_debug": rep.get("match_debug"),
                 "crop_path": str(crop_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
                 "cluster_size": len(cluster["members"]),
                 "cluster_examples": [
-                    {
-                        "screenshot": member["screenshot"],
-                        "player": member["player"],
-                        "slot": member["slot"],
-                        "predicted_label": member["predicted_label"],
-                        "score": member["score"],
-                    }
+                    _serialize_member(member)
                     for member in cluster["members"][:5]
                 ],
                 "cluster_members": [
-                    {
-                        "screenshot": member["screenshot"],
-                        "player": member["player"],
-                        "slot": member["slot"],
-                        "predicted_label": member["predicted_label"],
-                    }
+                    _serialize_member(member)
                     for member in cluster["members"]
                 ],
                 "status": status,
@@ -283,28 +443,143 @@ def generate_candidates(
     return payload
 
 
-def _format_candidate(item: dict) -> str:
+def _format_score(score: float | None) -> str:
+    if score is None:
+        return "?"
+    return f"{float(score):.3f}"
+
+
+def _format_match_debug(debug: dict | None) -> list[str]:
+    if not debug:
+        return []
+    top1 = debug.get("top1_label") or "?"
+    top2 = debug.get("top2_label") or "?"
+    lines = [
+        "  match_debug:",
+        (
+            f"    top1: {top1} score={_format_score(debug.get('top1_score'))} "
+            f"top2: {top2} score={_format_score(debug.get('top2_score'))} "
+            f"gap={_format_score(debug.get('gap'))} "
+            f"reject={debug.get('reject_reason', '?')}"
+        ),
+    ]
+    extras: list[str] = []
+    if debug.get("top1_shape") is not None:
+        extras.append(f"top1_shape={_format_score(debug.get('top1_shape'))}")
+    if debug.get("top1_color") is not None:
+        extras.append(f"top1_color={_format_score(debug.get('top1_color'))}")
+    if debug.get("top2_shape") is not None:
+        extras.append(f"top2_shape={_format_score(debug.get('top2_shape'))}")
+    if debug.get("top2_color") is not None:
+        extras.append(f"top2_color={_format_score(debug.get('top2_color'))}")
+    if debug.get("match_path"):
+        extras.append(f"path={debug['match_path']}")
+    if extras:
+        lines.append(f"    {' '.join(extras)}")
+    return lines
+
+
+def _member_match_debug_suffix(member: dict) -> str:
+    debug = member.get("match_debug")
+    if not debug:
+        return ""
+    top1 = debug.get("top1_label") or "?"
+    top2 = debug.get("top2_label") or "?"
+    return (
+        f" | top1={top1}({_format_score(debug.get('top1_score'))}) "
+        f"top2={top2}({_format_score(debug.get('top2_score'))}) "
+        f"gap={_format_score(debug.get('gap'))} "
+        f"reject={debug.get('reject_reason', '?')}"
+    )
+
+
+def _enrich_cluster_members(item: dict) -> list[dict]:
+    """Normalize cluster members; backfill score/reason from cluster_examples when missing."""
+    members = list(item.get("cluster_members") or [])
+    if not members:
+        members = list(item.get("cluster_examples") or [])
+    if not members:
+        members = [
+            {
+                "screenshot": item["screenshot"],
+                "player": item["player"],
+                "slot": item["slot"],
+                "predicted_label": item.get("predicted_label"),
+                "score": item.get("score"),
+                "reason": item.get("reason"),
+                "path": item.get("path"),
+                "match_debug": item.get("match_debug"),
+            }
+        ]
+
+    example_lookup: dict[tuple[str, int, int], dict] = {}
+    for example in item.get("cluster_examples") or []:
+        key = (example["screenshot"], example["player"], example["slot"])
+        example_lookup[key] = example
+
+    default_reason = item.get("reason", "")
+    enriched: list[dict] = []
+    for member in members:
+        key = (member["screenshot"], member["player"], member["slot"])
+        example = example_lookup.get(key, {})
+        enriched.append(
+            {
+                "screenshot": member["screenshot"],
+                "player": member["player"],
+                "slot": member["slot"],
+                "path": member.get("path") or example.get("path") or item.get("path"),
+                "predicted_label": member.get("predicted_label") or "unknown",
+                "score": (
+                    member["score"]
+                    if member.get("score") is not None
+                    else example.get("score")
+                ),
+                "reason": member.get("reason") or example.get("reason") or default_reason,
+                "match_debug": (
+                    member.get("match_debug")
+                    or example.get("match_debug")
+                    or item.get("match_debug")
+                ),
+            }
+        )
+    return enriched
+
+
+def _prediction_distribution(members: list[dict]) -> list[tuple[str, int]]:
+    counts = Counter(member.get("predicted_label") or "unknown" for member in members)
+    return counts.most_common()
+
+
+def _format_candidate(item: dict, *, member_limit: int = REVIEW_MEMBER_LIMIT) -> str:
     lines = [
         f"[{item['id']}] {item['kind']} candidate ({item['reason']})",
         f"  screenshot: {item['screenshot']}",
         f"  player/slot: P{item['player'] + 1} slot {item['slot'] + 1}",
-        f"  predicted: {item['predicted_label']} score={item.get('score')}",
+        f"  predicted: {item['predicted_label']} score={_format_score(item.get('score'))}",
         f"  crop: {item['crop_path']}",
         f"  cluster_size: {item.get('cluster_size', 1)}",
     ]
-    members = item.get("cluster_members") or item.get("cluster_examples") or []
-    if len(members) > 1:
-        lines.append("  similar slots:")
-        for ex in members:
-            if (
-                ex["screenshot"] == item["screenshot"]
-                and ex["player"] == item["player"]
-                and ex["slot"] == item["slot"]
-            ):
-                continue
-            lines.append(
-                f"    - {ex['screenshot']} P{ex['player'] + 1} slot {ex['slot'] + 1}"
-            )
+
+    members = _enrich_cluster_members(item)
+    distribution = _prediction_distribution(members)
+    if distribution:
+        dist_text = ", ".join(f"{label} x{count}" for label, count in distribution)
+        lines.append(f"  prediction_dist: {dist_text}")
+
+    lines.extend(_format_match_debug(item.get("match_debug")))
+
+    lines.append("  cluster_samples:")
+    for member in members[:member_limit]:
+        lines.append(
+            f"    - {member['screenshot']} P{member['player'] + 1} slot {member['slot'] + 1} "
+            f"-> {member['predicted_label']} score={_format_score(member.get('score'))} "
+            f"reason={member.get('reason', '')}"
+            f"{_member_match_debug_suffix(member)}"
+        )
+    remaining = len(members) - min(len(members), member_limit)
+    if remaining > 0:
+        lines.append(f"    ... and {remaining} more")
+
     return "\n".join(lines)
 
 
@@ -450,6 +725,7 @@ def review_candidates(
     auto_yes: bool = False,
     include_rejected: bool = False,
     review_id: str | None = None,
+    member_limit: int = REVIEW_MEMBER_LIMIT,
 ) -> dict[str, int]:
     data = json.loads(candidates_json.read_text(encoding="utf-8"))
     stats = {"accepted": 0, "gt_mapped": 0, "rejected": 0, "skipped": 0, "quit": 0}
@@ -463,7 +739,7 @@ def review_candidates(
             review_id=review_id,
         ):
             continue
-        print("\n" + _format_candidate(item))
+        print("\n" + _format_candidate(item, member_limit=member_limit))
         if auto_yes:
             answer = "n"
         else:
@@ -651,6 +927,7 @@ def command_review(args: argparse.Namespace) -> None:
         auto_yes=args.auto_no,
         include_rejected=args.include_rejected,
         review_id=args.review_id,
+        member_limit=args.member_limit,
     )
     print("\nReview summary:")
     for key, value in stats.items():
@@ -733,6 +1010,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="review_id",
         metavar="CANDIDATE_ID",
         help="Review a specific candidate (e.g. c0001), even if rejected",
+    )
+    review.add_argument(
+        "--member-limit",
+        type=int,
+        default=REVIEW_MEMBER_LIMIT,
+        help="Max cluster sample lines to print per candidate (default: 10)",
     )
     review.set_defaults(func=command_review)
     return parser
