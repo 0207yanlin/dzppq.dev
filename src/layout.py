@@ -32,6 +32,13 @@ CARD_Y_BASE = 305
 CARD_W = 45
 CARD_H = 45
 
+# Hand-pick UI (three large card choices, landscape 2160x1600)
+HAND_CARD_BOXES: tuple[tuple[int, int, int, int], ...] = (
+    (510, 490, 1050, 650),
+    (1050, 490, 1590, 650),
+    (1590, 490, 2130, 650),
+)
+
 EQUIPMENT_X_BASE = 581
 EQUIPMENT_Y_BASE = 345
 EQUIPMENT_W = 72
@@ -68,6 +75,18 @@ def card_roi(player: int, slot: int) -> tuple[int, int, int, int]:
     x1 = CARD_X_BASE + CARD_X_OFFSET[slot]
     y1 = CARD_Y_BASE + CARD_Y_OFFSET[player]
     return x1, y1, x1 + CARD_W, y1 + CARD_H
+
+
+def hand_card_roi(slot: int) -> tuple[int, int, int, int]:
+    """Return (x1, y1, x2, y2) for a hand-pick card choice ROI."""
+    if not 0 <= slot < len(HAND_CARD_BOXES):
+        raise IndexError(f"hand card slot must be 0..{len(HAND_CARD_BOXES) - 1}")
+    return HAND_CARD_BOXES[slot]
+
+
+def crop_hand_cards(img: np.ndarray) -> list[np.ndarray]:
+    """Crop the three large card-choice ROIs from a screenshot."""
+    return [crop_roi(img, box) for box in HAND_CARD_BOXES]
 
 
 def equipment_roi(player: int, slot: int) -> tuple[int, int, int, int]:

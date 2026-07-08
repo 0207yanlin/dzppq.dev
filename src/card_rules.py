@@ -16,10 +16,26 @@ FAST_XXB_LABEL = "黄·快速成型"
 MANA_FOCUS_LABEL = "白·法力专注"
 KZDH_LABEL = "蓝·开攒大亨"
 SSS_LABEL = "蓝·一起刷刷刷+天降啾啾pro"
+BOYL_LABEL = "蓝·波纹利己"
+FDYQ_LABEL = "蓝·福袋有钱"
+YELLOW_GONGMING_LABEL = "黄·装备共鸣"
+YELLOW_DLS_LABEL = "黄·大力巫术守护"
+CAI_GONGMING_PRO_LABEL = "彩·装备共鸣pro"
+CAI_GIFT_PACK_LABEL = "彩·法师战士射手礼包"
 
 CARD_LABEL_ALIASES: dict[str, str] = {
     "重质也重量pro": QUALITY_WEIGHT_PRO_LABEL,
     "拍档支援": QUALITY_PARTNER_SUPPORT_LABEL,
+    "最佳拍档": "拍档支援",
+    "最强支援": "拍档支援",
+    "一起刷刷刷": "一起刷刷刷+天降啾啾pro",
+    "天降啾啾pro": "一起刷刷刷+天降啾啾pro",
+    "开攒": "开攒大亨",
+    "大亨": "开攒大亨",
+    "福袋": "福袋有钱",
+    "福袋·蓝": "福袋有钱",
+    "有钱同享": "福袋有钱",
+    "利己主义": "波纹利己",
     "装备共鸣法pro": "装备共鸣pro",
     "装备共鸣血pro": "装备共鸣pro",
     "装备共鸣攻pro": "装备共鸣pro",
@@ -29,13 +45,32 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "大力": "大力巫术守护",
     "巫术": "大力巫术守护",
     "守护": "大力巫术守护",
-    "福袋·蓝": "福袋有钱",
-    "有钱同享": "福袋有钱",
+    "法师礼包": "法师战士射手礼包",
+    "射手礼包": "法师战士射手礼包",
+    "战士礼包": "法师战士射手礼包",
     "法力专注": MANA_FOCUS_LABEL,
+    "蓝·最佳拍档": QUALITY_PARTNER_SUPPORT_LABEL,
+    "蓝·最强支援": QUALITY_PARTNER_SUPPORT_LABEL,
     "蓝·开攒": KZDH_LABEL,
     "蓝·大亨": KZDH_LABEL,
     "蓝·一起刷刷刷": SSS_LABEL,
     "蓝·天降啾啾pro": SSS_LABEL,
+    "蓝·福袋": FDYQ_LABEL,
+    "蓝·有钱同享": FDYQ_LABEL,
+    "蓝·利己主义": BOYL_LABEL,
+    "蓝·最后的波纹": BOYL_LABEL,
+    "黄·装备共鸣法": YELLOW_GONGMING_LABEL,
+    "黄·装备共鸣攻": YELLOW_GONGMING_LABEL,
+    "黄·装备共鸣血": YELLOW_GONGMING_LABEL,
+    "黄·大力": YELLOW_DLS_LABEL,
+    "黄·巫术": YELLOW_DLS_LABEL,
+    "黄·守护": YELLOW_DLS_LABEL,
+    "彩·装备共鸣法pro": CAI_GONGMING_PRO_LABEL,
+    "彩·装备共鸣攻pro": CAI_GONGMING_PRO_LABEL,
+    "彩·装备共鸣血pro": CAI_GONGMING_PRO_LABEL,
+    "彩·法师礼包": CAI_GIFT_PACK_LABEL,
+    "彩·射手礼包": CAI_GIFT_PACK_LABEL,
+    "彩·战士礼包": CAI_GIFT_PACK_LABEL,
 }
 
 # Map merged template bodies to canonical bodies before context rules run.

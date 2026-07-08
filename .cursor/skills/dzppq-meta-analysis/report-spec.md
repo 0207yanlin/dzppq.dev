@@ -4,6 +4,9 @@
 
 Primary input is a SQLite DB matching `src/match_db.py`:
 
+- `matches.path`: batch folder such as `screenshots.0701/...`; this is the source of truth for batch date.
+- `matches.match_date`: stored `MMDD` batch key parsed from `path`.
+- `matches.captured_at`: screenshot timestamp only; do not use for recency weighting.
 - `players.rank`: lower is better.
 - `heroes.slot_index`: lower means earlier board position.
 - `heroes.stars`, `heroes.equipment_count`, `hero_equipments.equipment_name`.
@@ -22,6 +25,9 @@ Apply filtering before all rankings:
 - Exclude card-granted heroes such as `暴龙虾饺` from lineup level, representative lineup lists, and displayed core heroes.
 - Keep a data-quality summary with raw counts and excluded counts.
 - Keep low-sample rows only when useful for discovery, and mark confidence as low.
+- Weight recent batches more heavily using `matches.match_date` / `screenshots.MMDD` from `path`.
+- Use exponential decay with default half-life 2 days and minimum weight 0.25.
+- Keep raw `appearances` for minimum-sample thresholds; use weighted values for avg rank, top4, win rate, popularity share, and sorting.
 
 ## Feature Rules
 
@@ -36,6 +42,17 @@ Apply filtering before all rankings:
 - Count each known hero bond once per hero.
 - For equipment ending in `啾啾`, add 1 to the matching bond if the bond exists in `dict_bond`.
 - Active tier is the highest threshold satisfied by the final count.
+
+### Primary Bond Strength
+
+Separate from composition `main_bond` and from activated bond-tier rows in `heroes_and_equipment.bonds`:
+
+- For each filtered player board, look only at activated bonds.
+- Primary bond(s) are the activated bond(s) with the highest activation count (`trait_totals`, including jiujiu bonus).
+- If multiple bonds tie on count, count the same player for each tied bond.
+- Aggregate statistics by bond name only; do not split `学习社3` and `学习社5` into separate rows.
+- Rank bonds by average rank ascending, then top4 rate descending, then sample size.
+- Keep existing bond-tier and jiujiu sections unchanged.
 
 ### Carry Score
 
@@ -214,32 +231,25 @@ Use this Markdown shape:
 ## 阵容成型难度与热门程度
 ## 卡牌强度分析
 ## 强势棋子与装备推荐
+## 主羁绊强度
 ## 羁绊表现与啾啾影响
 ## 版本陷阱分析
 ## 平衡性调整追踪
 ## 数据质量与可信度说明
 ```
 
-## HTML Poster Output
+## Interactive HTML Dashboard
 
-Also write `data/latest_meta_analysis_report.html`:
+Also write `data/环境分析详情.html`:
 
-- fixed-width poster around 1080px, designed for a 3:4 screenshot.
-- show sample summary, top strategy comps split by `赌狗`/`高费`, mature lineup, deduped transition path, top 3 carry requirements, jiujiu dependency notes, card picks, jiujiu highlights, and structured traps.
-- do not mirror the full Markdown report; keep the HTML concise and visual.
-
-## Interactive HTML Tables And Detail Pages
-
-Also write these standalone HTML files under `data/`:
-
-- `latest_meta_analysis_compositions.html`: paginated comp recommendation pages, one comp per page, with 7/8/9 board cards.
-- `latest_meta_analysis_jiujiu_comps.html`: sortable table for jiujiu-dependent recommended comps.
-- `latest_meta_analysis_jiujiu_wearers.html`: sortable table for recommended jiujiu wearer heroes.
-- `latest_meta_analysis_equipment.html`: filterable hero equipment table with cost/trait/search filters and sortable columns.
-- `latest_meta_analysis_trap_compositions.html`: trap comp detail cards with 7/8/9 observed boards.
-- existing sortable tables: `latest_meta_analysis_cards_{cai,yellow,blue,white}.html`, `latest_meta_analysis_duo_compositions.html`, `latest_meta_analysis_low_cost_carries.html`.
-
-Sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
+- one tabbed dashboard with clickable top-level panels.
+- default panel order: composition recommendations, primary bond strength, equipment, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
+- support hash navigation such as `#equipment`, `#compositions`, and `#primary-bond`.
+- sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
+- equipment panel keeps cost/trait/search filters and sortable columns.
+- composition panel keeps paginated comp detail pages with 7/8/9 board cards and `赌狗/高费` filters.
+- trap panel keeps trap comp cards with 7/8/9 observed boards.
+- do not write separate poster HTML or standalone per-table HTML files.
 
 ## Excel Equipment Output
 

@@ -54,34 +54,46 @@ def run_batch_predict(
 
 
 def command_build(args: argparse.Namespace) -> None:
-    screenshot_dir = args.screenshot_dir.resolve()
     gt_path = args.gt.resolve()
     db_path = args.db.resolve()
+    path_prefix = args.path_prefix or ""
 
-    png_count = len(collect_screenshots(screenshot_dir))
-    if png_count == 0:
-        raise SystemExit(f"No PNG files in {screenshot_dir}")
-
+    png_count: int | None = None
     if args.predict:
+        screenshot_dir = args.screenshot_dir.resolve()
+        png_count = len(collect_screenshots(screenshot_dir))
+        if png_count == 0:
+            raise SystemExit(f"No PNG files in {screenshot_dir}")
         run_batch_predict(screenshot_dir, gt_path, quiet=args.quiet, force=args.force)
 
     gt_data = load_match_ground_truth(gt_path)
     gt_in_dir = sum(
         1
         for entry in gt_data.get("screenshots", {}).values()
-        if entry.get("path", "").replace("\\", "/").startswith(args.path_prefix)
+        if not path_prefix
+        or entry.get("path", "").replace("\\", "/").startswith(path_prefix)
     )
-    if gt_in_dir < png_count:
-        print(
-            f"Warning: GT has {gt_in_dir} entries for prefix {args.path_prefix!r}, "
-            f"but directory has {png_count} PNG files."
-        )
+    if gt_in_dir == 0:
+        raise SystemExit(f"No GT entries matched path_prefix={path_prefix!r}")
+
+    if path_prefix and not args.predict:
+        screenshot_dir = args.screenshot_dir.resolve()
+        png_count = len(collect_screenshots(screenshot_dir))
+        if png_count == 0:
+            raise SystemExit(f"No PNG files in {screenshot_dir}")
+        if gt_in_dir < png_count:
+            print(
+                f"Warning: GT has {gt_in_dir} entries for prefix {path_prefix!r}, "
+                f"but directory has {png_count} PNG files."
+            )
+    elif not path_prefix:
+        print(f"Importing {gt_in_dir} GT entries across all screenshot batches")
 
     conn = init_match_db(db_path)
     stats = import_ground_truth(
         conn,
         gt_data,
-        path_prefix=args.path_prefix,
+        path_prefix=path_prefix,
         force=args.force,
         dedupe_similar=not args.no_dedupe_similar,
         similarity_threshold=args.similarity_threshold,
@@ -126,7 +138,13 @@ def command_build(args: argparse.Namespace) -> None:
             f"got {summary['matches']} "
             "(use --allow-partial to silence)"
         )
-    elif summary["matches"] != png_count and not args.allow_partial and args.no_dedupe_similar:
+    elif (
+        png_count is not None
+        and summary["matches"] != png_count
+        and not args.allow_partial
+        and args.no_dedupe_similar
+        and path_prefix
+    ):
         print(
             f"Warning: expected {png_count} matches, got {summary['matches']} "
             "(use --allow-partial to silence)"
@@ -140,12 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         type=Path,
-        default=ROOT / "data" / "matches_0701.db",
+        default=ROOT / "data" / "match_latest.db",
     )
     parser.add_argument(
         "--path-prefix",
-        default="screenshots.0701/",
-        help="Only import GT entries whose path starts with this prefix",
+        default="",
+        help="Only import GT entries whose path starts with this prefix; empty imports all batches",
     )
     parser.add_argument(
         "--predict",

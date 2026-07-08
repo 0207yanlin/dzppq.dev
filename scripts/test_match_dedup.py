@@ -17,7 +17,9 @@ from src.match_db import (  # noqa: E402
     cluster_similar_entries,
     import_ground_truth,
     init_match_db,
+    insert_match_entry,
     is_similar_match,
+    parse_match_batch,
 )
 
 
@@ -62,6 +64,32 @@ def _sample_entry(
 
 
 class MatchDedupTests(unittest.TestCase):
+    def test_parse_match_batch_prefers_path_over_captured_at(self) -> None:
+        batch = parse_match_batch(
+            "screenshots.0701/MuMu-20260702-010000-001.png",
+            "2026-07-02T01:00:00",
+        )
+        self.assertEqual(batch, "0701")
+
+    def test_parse_match_batch_falls_back_to_captured_at(self) -> None:
+        batch = parse_match_batch(None, "2026-07-03T12:00:00")
+        self.assertEqual(batch, "0703")
+
+    def test_insert_match_entry_stores_match_date(self) -> None:
+        entry = _sample_entry()
+        entry["path"] = "screenshots.0705/example.png"
+        entry["captured_at"] = "2026-07-06T01:00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "matches.db"
+            conn = init_match_db(db_path)
+            insert_match_entry(conn, "example.png", entry)
+            row = conn.execute(
+                "SELECT match_date FROM matches WHERE screenshot_name = ?",
+                ("example.png",),
+            ).fetchone()
+            conn.close()
+        self.assertEqual(row[0], "0705")
+
     def test_identical_entries_are_similar(self) -> None:
         left = build_match_fingerprint(_sample_entry())
         right = build_match_fingerprint(_sample_entry(highlight_player=3))

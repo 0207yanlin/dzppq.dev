@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +32,38 @@ from src.match_ground_truth import (  # noqa: E402
 )
 from src.parse import parse_hero_label  # noqa: E402
 from src.template_capture import capture_missing_templates, imread_image  # noqa: E402
+
+
+@dataclass
+class PredictionResult:
+    img_path: Path
+    entry: dict | None = None
+    summary: str | None = None
+    error: str | None = None
+    reused_cached: bool = False
+
+
+class BatchProgress:
+    """Single-line terminal progress for batch predict/label."""
+
+    def __init__(self, total: int, prefix: str = "") -> None:
+        self.total = max(total, 0)
+        self.prefix = prefix
+        self.current = 0
+        self._active = self.total > 0
+
+    def advance(self, label: str = "") -> None:
+        if not self._active:
+            return
+        self.current = min(self.current + 1, self.total)
+        pct = int(self.current * 100 / self.total)
+        display = label if len(label) <= 48 else f"...{label[-45:]}"
+        line = f"\r{self.prefix} [{self.current}/{self.total}] {pct:3d}% {display}"
+        print(line, end="", flush=True)
+
+    def finish_line(self) -> None:
+        if self._active and self.current > 0:
+            print(flush=True)
 
 
 def resolve_screenshot(path_or_name: str | Path, screenshot_dir: Path) -> Path:
@@ -60,6 +95,129 @@ def load_prediction_context(args: argparse.Namespace) -> PredictionContext:
     return ctx
 
 
+def predict_screenshot_entry(
+    ctx: PredictionContext,
+    img_path: Path,
+    *,
+    gt_data: dict | None = None,
+    force_predict: bool = False,
+) -> PredictionResult:
+    existing = None
+    if gt_data is not None:
+        existing = gt_data.get("screenshots", {}).get(img_path.name)
+    if (
+        not force_predict
+        and gt_data is not None
+        and prediction_cache_valid(existing, ctx.template_metadata or {})
+    ):
+        return PredictionResult(
+            img_path=img_path,
+            entry=existing,
+            summary=format_screenshot_summary(img_path.name, existing),
+            reused_cached=True,
+        )
+
+    img = imread_image(img_path)
+    if img is None:
+        return PredictionResult(
+            img_path=img_path,
+            error=f"failed to read screenshot: {img_path}",
+        )
+
+    prediction = ctx.predict_screenshot(img_path, img)
+    entry = build_screenshot_entry(
+        img_path,
+        prediction,
+        verified=False,
+        template_metadata=ctx.template_metadata,
+    )
+    return PredictionResult(
+        img_path=img_path,
+        entry=entry,
+        summary=format_screenshot_summary(img_path.name, entry),
+    )
+
+
+def run_parallel_predictions(
+    paths: list[Path],
+    ctx: PredictionContext,
+    *,
+    workers: int = 1,
+    gt_data: dict | None = None,
+    force_predict: bool = False,
+    on_progress: Callable[[Path, PredictionResult], None] | None = None,
+) -> list[PredictionResult]:
+    if workers <= 1 or len(paths) <= 1:
+        results: list[PredictionResult] = []
+        for path in paths:
+            result = predict_screenshot_entry(
+                ctx,
+                path,
+                gt_data=gt_data,
+                force_predict=force_predict,
+            )
+            if result.error:
+                raise RuntimeError(f"{result.img_path.name}: {result.error}")
+            if on_progress is not None:
+                on_progress(path, result)
+            results.append(result)
+        return results
+
+    results_by_name: dict[str, PredictionResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                predict_screenshot_entry,
+                ctx,
+                path,
+                gt_data=gt_data,
+                force_predict=force_predict,
+            ): path
+            for path in paths
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            if result.error:
+                raise RuntimeError(f"{result.img_path.name}: {result.error}")
+            results_by_name[result.img_path.name] = result
+            if on_progress is not None:
+                on_progress(result.img_path, result)
+    return [results_by_name[path.name] for path in paths]
+
+
+def paths_needing_prediction(
+    paths: list[Path],
+    gt_data: dict,
+    ctx: PredictionContext,
+    *,
+    force: bool = False,
+) -> list[Path]:
+    needing: list[Path] = []
+    for img_path in paths:
+        existing = gt_data.get("screenshots", {}).get(img_path.name)
+        if existing and existing.get("verified") and not force:
+            continue
+        if force or not prediction_cache_valid(existing, ctx.template_metadata or {}):
+            needing.append(img_path)
+    return needing
+
+
+def apply_prediction_results(
+    gt_data: dict,
+    results: list[PredictionResult],
+    *,
+    print_summaries: bool = False,
+) -> None:
+    for result in results:
+        if result.error:
+            raise RuntimeError(f"{result.img_path.name}: {result.error}")
+        if print_summaries and result.summary:
+            print(result.summary)
+        if result.reused_cached or result.entry is None:
+            continue
+        set_screenshot_entry(gt_data, result.img_path.name, result.entry)
+
+
 def command_predict(args: argparse.Namespace) -> None:
     screenshot_dir = args.screenshot_dir.resolve()
     ctx = load_prediction_context(args)
@@ -72,21 +230,36 @@ def command_predict(args: argparse.Namespace) -> None:
         print(f"No PNG files in {screenshot_dir}")
         return
 
+    batch_mode = len(paths) > 1
+    if batch_mode:
+        ctx.verbose = False
+
     gt_data = load_match_ground_truth(args.gt) if args.write else None
-    for img_path in paths:
-        prediction = ctx.predict_screenshot(img_path)
-        entry = build_screenshot_entry(
-            img_path,
-            prediction,
-            verified=False,
-            template_metadata=ctx.template_metadata,
-        )
-        print(format_screenshot_summary(img_path.name, entry))
-        if args.write:
-            set_screenshot_entry(gt_data, img_path.name, entry)
+    progress = BatchProgress(len(paths), "Predicting") if batch_mode else None
+    results = run_parallel_predictions(
+        paths,
+        ctx,
+        workers=args.workers,
+        gt_data=gt_data,
+        on_progress=(
+            (lambda path, _result: progress.advance(path.name))
+            if progress is not None
+            else None
+        ),
+    )
+    if progress is not None:
+        progress.finish_line()
+
+    for result in results:
+        if result.error:
+            raise RuntimeError(f"{result.img_path.name}: {result.error}")
+        if not batch_mode:
+            print(result.summary)
+        if args.write and gt_data is not None and result.entry is not None:
+            set_screenshot_entry(gt_data, result.img_path.name, result.entry)
     if args.write and gt_data is not None:
         save_match_ground_truth(gt_data, args.gt)
-        print(f"\nWrote predictions to {args.gt}")
+        print(f"Wrote predictions to {args.gt}")
 
 
 def _prompt_pairs(default: list[list[int]]) -> list[list[int]]:
@@ -283,11 +456,40 @@ def command_label(args: argparse.Namespace) -> None:
         if not paths:
             print(f"No PNG files in {screenshot_dir}")
             return
+        label_paths = []
         for img_path in paths:
             existing = gt_data.get("screenshots", {}).get(img_path.name)
             if existing and existing.get("verified") and not args.force:
                 print(f"Skip verified: {img_path.name}")
                 continue
+            label_paths.append(img_path)
+
+        ctx.verbose = False
+
+        prefetch_paths = paths_needing_prediction(
+            label_paths,
+            gt_data,
+            ctx,
+            force=args.force,
+        )
+        if prefetch_paths:
+            predict_progress = BatchProgress(len(prefetch_paths), "Predicting")
+            results = run_parallel_predictions(
+                prefetch_paths,
+                ctx,
+                workers=args.workers,
+                gt_data=gt_data,
+                force_predict=args.force,
+                on_progress=lambda path, _result: predict_progress.advance(path.name),
+            )
+            predict_progress.finish_line()
+            apply_prediction_results(gt_data, results)
+            save_match_ground_truth(gt_data, args.gt)
+
+        label_progress = BatchProgress(len(label_paths), "Labeling")
+        for img_path in label_paths:
+            label_progress.advance(img_path.name)
+            label_progress.finish_line()
             label_one_screenshot(
                 img_path,
                 ctx,
@@ -353,6 +555,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Hide prediction progress and timing output",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for batch prediction (default: 1)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -51,6 +52,8 @@ MATCH_SCREEN_RANK_BOX = (100, 1400, 260, 1600)
 MATCH_DURATION_BOX = (1270, 100, 1390, 200)
 PARTY_REVIEW_PERMISSION_BOX = (600, 1000, 1800, 1200)
 PARTY_REVIEW_LIST_BOX = (400, 500, 900, 1100)
+# Left profile sidebar; validated on rank_23_party_review_timeout.png
+PROFILE_LEFT_MENU_BOX = (0, 90, 300, 760)
 RANKING_VISIBLE_RANKS_BOX = (500, 850, 600, 1100)
 
 SCREEN_MAIN = "游戏主界面"
@@ -62,6 +65,22 @@ SCREEN_MATCH_SOLO_RANK = "对局截图界面-单人排名版"
 SCREEN_UNKNOWN = "未知界面"
 
 PARTY_REVIEW_PRIVATE_TEXT = "这名蛋仔设置了查阅权限"
+PROFILE_PARTY_REVIEW_ENTRY_TEXT = "派对回顾"
+PPQ_GAME_TEXT = "蛋仔碰碰棋"
+DUO_PEAK_TEXT = "双人巅峰"
+# Max vertical gap between OCR lines still treated as one party-review list entry.
+MAX_MATCH_BLOCK_Y_GAP = 80
+
+_OCR_MARKER_SEPARATORS = re.compile(r"[\s\-—–_|·・一]+")
+# Common OCR confusions seen in party-review mode labels.
+_OCR_MARKER_SUBSTITUTIONS = (
+    ("供", "棋"),
+    ("拱", "棋"),
+    ("火", "人"),
+    ("额", "巅"),
+    ("颠", "巅"),
+    ("蜂", "峰"),
+)
 
 _MATCH_DATETIME_RE = re.compile(
     r"(\d{2}-\d{2})\s*(\d{2}:\d{2})|(\d{2}-\d{2})(\d{2}:\d{2})"
@@ -472,6 +491,9 @@ def build_next_rank_spec(
     if visible_in_range and all(rank > next_target_rank for rank in visible_in_range):
         return [], skipped, "ranking_missing_expected_rank"
 
+    if visible_in_range and all(rank < next_target_rank for rank in visible_in_range):
+        return [], skipped, "ranking_target_ahead"
+
     if not visible_in_range or next_target_rank not in visible_in_range:
         return [], skipped, "ranking_missing_expected_rank"
 
@@ -512,14 +534,77 @@ class MatchEntry:
     dedup_key: str
 
 
+def _normalize_ocr_marker(text: str) -> str:
+    """Normalize OCR mode labels for fuzzy marker matching."""
+    normalized = _OCR_MARKER_SEPARATORS.sub("", text.strip())
+    for src, dst in _OCR_MARKER_SUBSTITUTIONS:
+        normalized = normalized.replace(src, dst)
+    return normalized
+
+
+def _has_ppq_marker(text: str) -> bool:
+    if PPQ_GAME_TEXT in text:
+        return True
+    return PPQ_GAME_TEXT in _normalize_ocr_marker(text)
+
+
+def _has_duo_peak_marker(text: str) -> bool:
+    if DUO_PEAK_TEXT in text:
+        return True
+    normalized = _normalize_ocr_marker(text)
+    if DUO_PEAK_TEXT in normalized:
+        return True
+    return "双人巅" in normalized
+
+
+def _match_block_has_ppq(
+    items: list[tuple[int, int, str, Any]],
+    duo_idx: int,
+) -> bool:
+    """Return True if a PPQ marker appears in the same list entry as duo peak."""
+    duo_y = items[duo_idx][0]
+    duo_text = items[duo_idx][2]
+    if _has_ppq_marker(duo_text):
+        return True
+
+    k = duo_idx - 1
+    while k >= 0:
+        prev_y, _, prev_text, _ = items[k]
+        if _has_duo_peak_marker(prev_text):
+            break
+        if normalize_match_datetime(prev_text):
+            break
+        if duo_y - prev_y > MAX_MATCH_BLOCK_Y_GAP:
+            break
+        if _has_ppq_marker(prev_text):
+            return True
+        k -= 1
+
+    k = duo_idx + 1
+    while k < len(items):
+        next_y, _, next_text, _ = items[k]
+        if _has_duo_peak_marker(next_text):
+            break
+        if normalize_match_datetime(next_text):
+            break
+        if next_y - duo_y > MAX_MATCH_BLOCK_Y_GAP:
+            break
+        if _has_ppq_marker(next_text):
+            return True
+        k += 1
+
+    return False
+
+
 def extract_match_entries(
     details: list[dict[str, Any]],
     roi_box: tuple[int, int, int, int],
     *,
     rank: int,
     player_index: int,
+    require_ppq: bool = True,
 ) -> list[MatchEntry]:
-    """Pair alternating ``双人巅峰`` rows with datetime rows in party review list."""
+    """Pair party-review rows with datetime rows in the match list."""
     items: list[tuple[int, int, str, Any]] = []
     for item in details:
         text = str(item.get("text", "")).strip()
@@ -533,7 +618,10 @@ def extract_match_entries(
     i = 0
     while i < len(items):
         _, _, text, _ = items[i]
-        if "双人巅峰" not in text:
+        if not _has_duo_peak_marker(text):
+            i += 1
+            continue
+        if require_ppq and not _match_block_has_ppq(items, i):
             i += 1
             continue
         duo_y = items[i][0]
@@ -546,7 +634,7 @@ def extract_match_entries(
                 time_y = items[j][0]
                 normalized = candidate
                 break
-            if "双人巅峰" in items[j][2]:
+            if _has_duo_peak_marker(items[j][2]):
                 break
             j += 1
         if normalized is not None and time_y is not None:
@@ -798,11 +886,8 @@ class AdbClient:
         self.width, self.height = parsed
         return self.width, self.height
 
-    def validate_resolution(self) -> tuple[tuple[int, int], tuple[int, int]]:
-        """Validate wm size and landscape screenshot dimensions.
-
-        Returns ``((wm_w, wm_h), (shot_w, shot_h))`` on success.
-        """
+    def validate_wm_size(self) -> tuple[int, int]:
+        """Validate device ``wm size`` matches expected portrait logical size."""
         serial = self.device_serial or "<unknown>"
         try:
             wm_w, wm_h = self.get_screen_size()
@@ -820,22 +905,57 @@ class AdbClient:
                 f"expected {expected_wm_w}x{expected_wm_h} for hardcoded coordinates. "
                 f"{ADB_RECOVERY_HINT}"
             )
+        return wm_w, wm_h
 
+    def _validate_screenshot_dimensions(self, img: np.ndarray) -> tuple[int, int]:
+        serial = self.device_serial or "<unknown>"
+        shot_h, shot_w = img.shape[:2]
+        expected_shot_w, expected_shot_h = EXPECTED_SCREENSHOT_SIZE
+        if (shot_w, shot_h) != (expected_shot_w, expected_shot_h):
+            wm_w, wm_h = self.width, self.height
+            raise RuntimeError(
+                f"Unexpected screenshot size on {serial}: {shot_w}x{shot_h}; "
+                f"expected {expected_shot_w}x{expected_shot_h} for hardcoded coordinates. "
+                f"(wm size was {wm_w}x{wm_h}) {ADB_RECOVERY_HINT}"
+            )
+        return shot_w, shot_h
+
+    def capture_bgr_validated(self) -> np.ndarray:
+        """Capture one screenshot after wm-size check and validate dimensions."""
+        serial = self.device_serial or "<unknown>"
+        wm_w, wm_h = self.validate_wm_size()
         try:
             img = self.capture_bgr()
         except Exception as exc:
             raise RuntimeError(
                 f"Screenshot capture failed on {serial}: {exc}. {ADB_RECOVERY_HINT}"
             ) from exc
-        shot_h, shot_w = img.shape[:2]
-        expected_shot_w, expected_shot_h = EXPECTED_SCREENSHOT_SIZE
-        if (shot_w, shot_h) != (expected_shot_w, expected_shot_h):
-            raise RuntimeError(
-                f"Unexpected screenshot size on {serial}: {shot_w}x{shot_h}; "
-                f"expected {expected_shot_w}x{expected_shot_h} for hardcoded coordinates. "
-                f"(wm size was {wm_w}x{wm_h}) {ADB_RECOVERY_HINT}"
-            )
+        shot_w, shot_h = self._validate_screenshot_dimensions(self._last_bgr)  # type: ignore[arg-type]
+        logger.info(
+            "Resolution OK: device=%s wm=%sx%s screenshot=%sx%s",
+            serial,
+            wm_w,
+            wm_h,
+            shot_w,
+            shot_h,
+        )
+        return img
 
+    def validate_resolution(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Validate wm size and landscape screenshot dimensions.
+
+        Returns ``((wm_w, wm_h), (shot_w, shot_h))`` on success.
+        """
+        wm_w, wm_h = self.validate_wm_size()
+        try:
+            img = self.capture_bgr()
+        except Exception as exc:
+            serial = self.device_serial or "<unknown>"
+            raise RuntimeError(
+                f"Screenshot capture failed on {serial}: {exc}. {ADB_RECOVERY_HINT}"
+            ) from exc
+        shot_w, shot_h = self._validate_screenshot_dimensions(self._last_bgr)  # type: ignore[arg-type]
+        serial = self.device_serial or "<unknown>"
         logger.info(
             "Resolution OK: device=%s wm=%sx%s screenshot=%sx%s",
             serial,
@@ -903,41 +1023,83 @@ class AdbClient:
         return path
 
 
-class OcrHelper:
-    def __init__(self) -> None:
-        self._engine: Any = None
-        self._backend: str | None = None
+@dataclass(frozen=True)
+class WarmupResult:
+    backend: str
+    elapsed_ms: float
+    success: bool
+    error: str | None = None
 
-    def _get_engine(self) -> Any:
-        if self._engine is not None:
-            return self._engine
+
+class OcrHelper:
+    def __init__(self, *, use_cls: bool = True) -> None:
+        self._local = threading.local()
+        self._backend: str | None = None
+        self._use_cls = use_cls
+        self._init_lock = threading.Lock()
+        self._warmup_lock = threading.Lock()
+        self._warmup_thread: threading.Thread | None = None
+        self._warmup_done = threading.Event()
+        self._warmup_result: WarmupResult | None = None
+
+    def _create_engine(self) -> Any:
+        rapidocr_error: Exception | None = None
         try:
             from rapidocr_onnxruntime import RapidOCR
 
-            self._engine = RapidOCR()
+            engine = RapidOCR(use_cls=self._use_cls)
             self._backend = "rapidocr"
-            logger.info("OCR backend: rapidocr")
-            return self._engine
-        except ImportError:
-            pass
+            logger.info("OCR backend: rapidocr (use_cls=%s)", self._use_cls)
+            return engine
+        except Exception as exc:
+            rapidocr_error = exc
+            logger.warning("rapidocr unavailable: %s", exc)
+
+        easyocr_error: Exception | None = None
         try:
             import easyocr
 
-            self._engine = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+            engine = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
             self._backend = "easyocr"
             logger.info("OCR backend: easyocr")
-            return self._engine
-        except ImportError as exc:
-            raise ImportError(
-                "OCR engine missing. Install with: pip install rapidocr-onnxruntime"
-            ) from exc
+            return engine
+        except Exception as exc:
+            easyocr_error = exc
+            logger.warning("easyocr unavailable: %s", exc)
 
-    def run_ocr(self, patch: np.ndarray) -> list[dict[str, Any]]:
+        parts: list[str] = []
+        if rapidocr_error is not None:
+            parts.append(f"rapidocr: {rapidocr_error}")
+        if easyocr_error is not None:
+            parts.append(f"easyocr: {easyocr_error}")
+        message = "OCR engine unavailable. " + "; ".join(parts)
+        raise ImportError(message) from (easyocr_error or rapidocr_error)
+
+    def _get_engine(self) -> Any:
+        engine = getattr(self._local, "engine", None)
+        if engine is not None:
+            return engine
+        with self._init_lock:
+            engine = getattr(self._local, "engine", None)
+            if engine is None:
+                engine = self._create_engine()
+                self._local.engine = engine
+        return engine
+
+    def run_ocr(
+        self,
+        patch: np.ndarray,
+        *,
+        use_cls: bool | None = None,
+    ) -> list[dict[str, Any]]:
         engine = self._get_engine()
         if self._backend == "easyocr":
             raw = engine.readtext(patch)
             return [{"text": t, "score": float(s), "box": b} for b, t, s in raw]
-        result, _ = engine(patch)
+        ocr_kwargs: dict[str, Any] = {}
+        if use_cls is not None:
+            ocr_kwargs["use_cls"] = use_cls
+        result, _ = engine(patch, **ocr_kwargs)
         if not result:
             return []
         return [{"text": t, "score": float(s), "box": b} for b, t, s in result]
@@ -946,17 +1108,85 @@ class OcrHelper:
         self,
         img: np.ndarray,
         box: tuple[int, int, int, int] | None = None,
+        *,
+        use_cls: bool | None = None,
     ) -> str:
         patch = crop_roi(img, box) if box is not None else img
-        return "".join(item["text"] for item in self.run_ocr(patch))
+        return "".join(item["text"] for item in self.run_ocr(patch, use_cls=use_cls))
 
     def ocr_details(
         self,
         img: np.ndarray,
         box: tuple[int, int, int, int] | None = None,
+        *,
+        use_cls: bool | None = None,
     ) -> list[dict[str, Any]]:
         patch = crop_roi(img, box) if box is not None else img
-        return self.run_ocr(patch)
+        return self.run_ocr(patch, use_cls=use_cls)
+
+    def _run_warmup_once(self) -> WarmupResult:
+        started = time.perf_counter()
+        try:
+            dummy = np.zeros((32, 128, 3), dtype=np.uint8)
+            self.ocr_text(dummy)
+            backend = self._backend or "unknown"
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info("OCR warmup completed (backend=%s, %.0f ms)", backend, elapsed_ms)
+            return WarmupResult(backend=backend, elapsed_ms=elapsed_ms, success=True)
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.warning("OCR warmup failed after %.0f ms: %s", elapsed_ms, exc)
+            return WarmupResult(
+                backend=self._backend or "unknown",
+                elapsed_ms=elapsed_ms,
+                success=False,
+                error=str(exc),
+            )
+
+    def warmup(self, *, blocking: bool = False, timeout: float | None = 120.0) -> WarmupResult | None:
+        """Preload OCR models. Returns result when blocking=True."""
+        with self._warmup_lock:
+            if self._warmup_result is not None:
+                return self._warmup_result
+            if self._warmup_thread is None or not self._warmup_thread.is_alive():
+                self._warmup_thread = threading.Thread(
+                    target=self._warmup_worker,
+                    name="ocr-warmup",
+                    daemon=True,
+                )
+                self._warmup_thread.start()
+            if not blocking:
+                return None
+        finished = self._warmup_done.wait(timeout)
+        result = self._warmup_result
+        if not finished or result is None:
+            raise TimeoutError("OCR warmup did not finish in time")
+        if not result.success:
+            raise RuntimeError(result.error or "OCR warmup failed")
+        return result
+
+    def _warmup_worker(self) -> None:
+        result = self._run_warmup_once()
+        self._warmup_result = result
+        self._warmup_done.set()
+
+    def start_warmup_async(self) -> None:
+        """Start OCR warmup in the background if not already started."""
+        self.warmup(blocking=False)
+
+    def ensure_ready(self, timeout: float | None = 120.0) -> WarmupResult:
+        """Wait for OCR warmup and return the result."""
+        result = self.warmup(blocking=True, timeout=timeout)
+        assert result is not None
+        return result
+
+    @property
+    def warmup_finished(self) -> bool:
+        return self._warmup_done.is_set()
+
+    @property
+    def warmup_result(self) -> WarmupResult | None:
+        return self._warmup_result
 
 
 @dataclass
@@ -976,6 +1206,16 @@ class PartyReviewWaitResult:
     polls: int
     stable: bool
     stable_hits_used: int = 0
+
+
+@dataclass
+class ProfilePartyReviewEntryWaitResult:
+    ready: bool
+    img: np.ndarray | None
+    elapsed_ms: int
+    polls: int
+    stable: bool
+    on_profile: bool
 
 
 class ScreenDetector:
@@ -1007,11 +1247,79 @@ class ScreenDetector:
     def has_party_review_content(self, img: np.ndarray) -> bool:
         for item in self.ocr.ocr_details(img, PARTY_REVIEW_LIST_BOX):
             text = str(item.get("text", "")).strip()
-            if "双人巅峰" in text:
+            if DUO_PEAK_TEXT in text:
                 return True
             if normalize_match_datetime(text):
                 return True
         return False
+
+    def has_profile_party_review_entry(self, img: np.ndarray) -> bool:
+        text = self.ocr.ocr_text(img, PROFILE_LEFT_MENU_BOX)
+        if PROFILE_PARTY_REVIEW_ENTRY_TEXT in text:
+            return True
+        # OCR may drop the last character on narrow crops.
+        return "派对回" in text
+
+    def is_profile_party_review_entry_ready(self, img: np.ndarray) -> bool:
+        return (
+            self.detect(img) == SCREEN_PROFILE
+            and self.has_profile_party_review_entry(img)
+        )
+
+    def wait_for_profile_party_review_entry(
+        self,
+        adb: AdbClient,
+        *,
+        timeout: float = 8.0,
+        poll: float = 0.6,
+        stable_hits: int = 2,
+        verbose: bool = False,
+    ) -> ProfilePartyReviewEntryWaitResult:
+        start = time.time()
+        deadline = start + timeout
+        last_img: np.ndarray | None = None
+        polls = 0
+        consecutive = 0
+        last_on_profile = False
+
+        while time.time() < deadline:
+            polls += 1
+            last_img = adb.capture_bgr()
+            screen = self.detect(last_img)
+            last_on_profile = screen == SCREEN_PROFILE
+            ready = last_on_profile and self.has_profile_party_review_entry(last_img)
+            if verbose:
+                logger.debug(
+                    "wait_for_profile_party_review_entry poll=%s ready=%s on_profile=%s",
+                    polls,
+                    ready,
+                    last_on_profile,
+                )
+            if ready:
+                consecutive += 1
+                if consecutive >= stable_hits:
+                    elapsed_ms = int((time.time() - start) * 1000)
+                    return ProfilePartyReviewEntryWaitResult(
+                        ready=True,
+                        img=last_img,
+                        elapsed_ms=elapsed_ms,
+                        polls=polls,
+                        stable=True,
+                        on_profile=True,
+                    )
+            else:
+                consecutive = 0
+            time.sleep(poll)
+
+        elapsed_ms = int((time.time() - start) * 1000)
+        return ProfilePartyReviewEntryWaitResult(
+            ready=False,
+            img=last_img,
+            elapsed_ms=elapsed_ms,
+            polls=polls,
+            stable=False,
+            on_profile=last_on_profile,
+        )
 
     def classify_party_review_state(self, img: np.ndarray) -> str | None:
         """Return ``private``, ``public``, or ``None`` if still loading."""

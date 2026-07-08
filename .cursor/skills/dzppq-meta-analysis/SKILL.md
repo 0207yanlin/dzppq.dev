@@ -12,7 +12,8 @@ When the user asks for a DZPPQ meta/environment report:
 1. Read this file, [intro.md](intro.md), and [report-spec.md](report-spec.md).
 2. Resolve the match database:
    - Use the user-provided DB path when present.
-   - Otherwise use the newest `data/matches_*.db`.
+   - Otherwise use `data/match_latest.db`.
+   - If that file is missing, fall back to the newest `data/matches_*.db`.
    - If no DB exists, tell the user to build/import the latest DB first.
 3. Run the built-in analyzer before writing conclusions:
 
@@ -20,12 +21,12 @@ When the user asks for a DZPPQ meta/environment report:
 python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 ```
 
-Use `--db <path>` when the user provides a database. If the user provides balance notes in a file, pass `--balance-notes <path>`.
+Use `--db <path>` when the user provides a database. If the user provides balance notes in a file, pass `--balance-notes <path>`. Recent-environment weighting uses batch date from `matches.path` (`screenshots.MMDD`), not screenshot capture time.
 
-4. Base the final answer on `data/latest_meta_analysis_report.html`, `data/latest_meta_analysis_report.md`, `data/latest_meta_analysis.json`, `data/latest_meta_analysis_equipment.xlsx`, and the interactive HTML exports listed below.
+4. Base the final answer on `data/环境分析详情.html`, `data/latest_meta_analysis_report.md`, `data/latest_meta_analysis.json`, and `data/latest_meta_analysis_equipment.xlsx`.
 5. Mention data quality caveats: sample size, unknown labels, excluded bot records, and low-confidence segments.
 
-Per-hero equipment tables are exported to Excel and a filterable HTML table; the Markdown report keeps a short carry overview and links to those files.
+Per-hero equipment tables are exported to Excel; the interactive HTML dashboard and Markdown report keep a short carry overview and link to those files. Use hash anchors such as `#equipment`, `#compositions`, and `#primary-bond` to jump to specific panels inside `data/环境分析详情.html`.
 
 Do not use older report files as the primary source. Older scripts in `scripts/` and `src/meta_analysis.py` are historical references only unless the user explicitly asks to compare with them.
 
@@ -49,17 +50,14 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Count cross-strategy contest pressure when strategies need the same 3-star main carry, even if their final bonds differ.
 - Treat weak lower-tier bond rows covered by a strong mature strategy as formation pressure, not standalone version traps.
 - Evaluate jiujiu only when it contributes as a final main/sub bond, specific hero boost, or cross-strategy generalist value.
+- Weight recent batches more heavily using `screenshots.MMDD` from `matches.path`; keep raw sample counts for confidence thresholds.
 
 ## Output Expectations
 
 Write concise Chinese conclusions. Include:
 
 - Separate `赌狗` and `高费` comp recommendations with concrete 7/8/9-level hero lists when data supports them.
-- HTML one-image poster at `data/latest_meta_analysis_report.html` for visual sharing.
-- Paginated comp detail HTML at `data/latest_meta_analysis_compositions.html`.
-- Sortable jiujiu HTML tables at `data/latest_meta_analysis_jiujiu_comps.html` and `data/latest_meta_analysis_jiujiu_wearers.html`.
-- Filterable equipment HTML at `data/latest_meta_analysis_equipment.html`.
-- Trap comp detail HTML at `data/latest_meta_analysis_trap_compositions.html`.
+- Interactive HTML dashboard at `data/环境分析详情.html` with tabbed panels for comp details, equipment, cards, jiujiu, traps, duo synergy, low-cost carry difficulty, and primary bond strength.
 - Excel equipment workbook at `data/latest_meta_analysis_equipment.xlsx` for per-hero and per-comp equipment detail.
 - Carry analysis for each recommended comp, including top 3 carries with priority.
 - Card strength, with composition-specific notes when sample size allows.
@@ -73,6 +71,7 @@ Write concise Chinese conclusions. Include:
 - Jiujiu strength ranking and recommended comps for each jiujiu item.
 - Jiujiu recommended comps should include observed wearer heroes when available.
 - Version traps: popular but weak heroes, comps, bonds, equipment, or cards.
+- Primary bond strength ranking: aggregate by bond name using max activation count on final boards; ties count all tied bonds.
 - Balance-change tracking when the user provides patch notes.
 
 If a section is low confidence, keep it in the report but label it clearly instead of hiding it.

@@ -9,37 +9,31 @@ Older files under repository `scripts/` and `src/meta_analysis.py` are historica
 ## Data Flow
 
 ```text
-data/matches_*.db
+data/match_latest.db
   -> find_latest_db() / find_bot_player_ids()
-  -> load_player_features()
+  -> load_player_features() + batch recency weights from matches.path
   -> cluster_compositions()
   -> merge_comp_strategies()
   -> analyze_heroes_and_equipment() / analyze_cards() / analyze_jiujiu()
   -> find_traps()
   -> build_analysis()
-  -> render_md() / render_html() / render_xlsx() / JSON dump
+  -> render_md() / render_interactive_html() / render_xlsx() / JSON dump
 ```
 
 Default outputs:
 
 - `data/latest_meta_analysis.json`
 - `data/latest_meta_analysis_report.md`
-- `data/latest_meta_analysis_report.html`
 - `data/latest_meta_analysis_equipment.xlsx`
-- `data/latest_meta_analysis_compositions.html`
-- `data/latest_meta_analysis_jiujiu_comps.html`
-- `data/latest_meta_analysis_jiujiu_wearers.html`
-- `data/latest_meta_analysis_equipment.html`
-- `data/latest_meta_analysis_trap_compositions.html`
-- sortable card/duo/low-cost HTML tables under `data/latest_meta_analysis_*.html`
+- `data/环境分析详情.html`
 
 Excel export requires `openpyxl`.
 
 ## Core Objects
 
 - `Hero`: one board unit with normalized name, cost tier, stars, equipment, traits, and carry score.
-- `PlayerFeature`: one filtered player board with heroes, cards, active traits, level label, top 3 carry candidates, and team rank.
-- `RankStats`: shared avg rank, top4, win-rate accumulator.
+- `PlayerFeature`: one filtered player board with heroes, cards, active traits, level label, top 3 carry candidates, team rank, batch date, and recency weight.
+- `RankStats`: shared avg rank, top4, win-rate accumulator with optional batch weighting.
 
 Main carry is investment-based:
 
@@ -70,10 +64,9 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 
 - `render_md()` writes the full audit report. The recommendation area is split into `赌狗阵容推荐` and `高费阵容推荐`. Per-hero equipment tables are not embedded; they go to Excel.
 - `render_md()` also includes low-cost 3-star carry difficulty, blue-card team-rank view, jiujiu wearer recommendations, and duo composition synergy when enough samples exist.
-- `render_html()` writes a concise 1080px poster. It uses the same split recommendations, not a Markdown-to-HTML conversion, and keeps only compact card/jiujiu/duo highlights.
-- `render_table_html_outputs()` writes sortable/filterable HTML tables and paginated comp/trap detail pages.
+- `render_interactive_html()` writes one tabbed dashboard at `data/环境分析详情.html`. It embeds sortable/filterable tables and paginated comp/trap detail panels.
 - `render_xlsx()` writes per-hero equipment, comp carry equipment, common 3-item sets, and low-sample observations.
-- HTML should stay visual and compact for the poster; dedicated HTML pages carry full comp, jiujiu, equipment, and trap detail.
+- The dashboard should stay interactive and compact; use hash anchors to link directly to specific panels.
 
 ## Common Edit Areas
 
@@ -87,11 +80,11 @@ The analyzer stores strategy-level majority classification plus a breakdown, so 
 - Jiujiu logic: `analyze_jiujiu()`.
 - Duo composition synergy: `analyze_duo_composition_synergy()`.
 - Trap logic and mature-strategy-covered lower-tier bonds: `find_traps()`.
-- Poster layout: `render_html()` and its small HTML helper functions.
+- Interactive dashboard layout: `render_interactive_html()` and panel render helpers.
 
 ## Safe Change Notes
 
 - Keep bot filtering, unknown filtering, card-granted hero exclusion, and jiujiu bond rules consistent with `report-spec.md`.
 - Do not recommend 3-star 4/5-cost carries as a normal requirement; keep them as ceiling samples.
 - Keep JSON additive when possible so downstream readers can continue using `rankings.compositions`.
-- Re-run the analyzer after changes and inspect all four default outputs.
+- Re-run the analyzer after changes and inspect JSON, Markdown, Excel, and the unified HTML dashboard.

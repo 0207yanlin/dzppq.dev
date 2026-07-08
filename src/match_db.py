@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+BATCH_PATH_RE = re.compile(r"screenshots\.(\d{4})[\\/]", re.IGNORECASE)
 
 UNKNOWN_LABELS = {"", "unknown", "未知"}
 DEFAULT_SIMILARITY_THRESHOLD = 0.88
@@ -21,6 +24,7 @@ CREATE TABLE IF NOT EXISTS matches (
     screenshot_name   TEXT NOT NULL UNIQUE,
     path              TEXT NOT NULL,
     captured_at       TEXT,
+    match_date        TEXT,
     labeled_at        TEXT,
     verified          INTEGER NOT NULL DEFAULT 0,
     highlight_player  INTEGER,
@@ -70,6 +74,7 @@ CREATE TABLE IF NOT EXISTS cards (
     card_score  REAL
 );
 
+CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date);
 CREATE INDEX IF NOT EXISTS idx_pairs_match_id ON pairs(match_id);
 CREATE INDEX IF NOT EXISTS idx_players_match_id ON players(match_id);
 CREATE INDEX IF NOT EXISTS idx_heroes_player_id ON heroes(player_id);
@@ -78,12 +83,49 @@ CREATE INDEX IF NOT EXISTS idx_cards_player_id ON cards(player_id);
 """
 
 
+def parse_match_batch(path: str | None, captured_at: str | None = None) -> str | None:
+    """Return MMDD batch key from screenshots.MMDD path prefix."""
+    text = (path or "").replace("\\", "/")
+    match = BATCH_PATH_RE.search(text)
+    if match:
+        return match.group(1)
+    if captured_at and len(captured_at) >= 10:
+        try:
+            return datetime.fromisoformat(captured_at[:10]).strftime("%m%d")
+        except ValueError:
+            return None
+    return None
+
+
+def ensure_match_schema(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
+    }
+    if "match_date" not in columns:
+        conn.execute("ALTER TABLE matches ADD COLUMN match_date TEXT")
+        conn.commit()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date)"
+    )
+    rows = conn.execute(
+        "SELECT id, path, captured_at, match_date FROM matches WHERE match_date IS NULL"
+    ).fetchall()
+    for match_id, path, captured_at, _ in rows:
+        batch = parse_match_batch(path, captured_at)
+        if batch:
+            conn.execute(
+                "UPDATE matches SET match_date = ? WHERE id = ?",
+                (batch, match_id),
+            )
+    conn.commit()
+
+
 def init_match_db(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(FULL_SCHEMA_SQL)
-    conn.commit()
+    ensure_match_schema(conn)
     return conn
 
 
@@ -421,17 +463,21 @@ def cluster_similar_entries(
 
 def insert_match_entry(conn: sqlite3.Connection, screenshot_name: str, entry: dict[str, Any]) -> int:
     processed_at = datetime.now(timezone.utc).isoformat()
+    rel_path = entry.get("path", screenshot_name)
+    captured_at = entry.get("captured_at")
+    match_date = parse_match_batch(rel_path, captured_at)
     cur = conn.execute(
         """
         INSERT INTO matches
-            (screenshot_name, path, captured_at, labeled_at, verified,
+            (screenshot_name, path, captured_at, match_date, labeled_at, verified,
              highlight_player, processed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             screenshot_name,
-            entry.get("path", screenshot_name),
-            entry.get("captured_at"),
+            rel_path,
+            captured_at,
+            match_date,
             entry.get("labeled_at"),
             1 if entry.get("verified") else 0,
             entry.get("highlight_player"),
@@ -522,7 +568,7 @@ def import_ground_truth(
     conn: sqlite3.Connection,
     gt_data: dict[str, Any],
     *,
-    path_prefix: str | None = "screenshots.0701/",
+    path_prefix: str | None = "",
     force: bool = False,
     dedupe_similar: bool = True,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,

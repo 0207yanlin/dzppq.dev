@@ -36,7 +36,6 @@ from src.adb_capture import (  # noqa: E402
     SWIPE_RANKING_ONE_PLAYER,
     TAP_BACK_FROM_MATCH,
     TAP_BACK_TO_RANKING,
-    TAP_FILTER_PPQ,
     TAP_MAIN_TO_TRANSIT,
     TAP_MATCH_ENTRY_X,
     TAP_PROFILE_PARTY_REVIEW,
@@ -48,6 +47,8 @@ from src.adb_capture import (  # noqa: E402
     AdbClient,
     MatchEntry,
     OcrHelper,
+    PartyReviewWaitResult,
+    ProfilePartyReviewEntryWaitResult,
     RankingEntry,
     ScreenDetector,
     all_dates_before_target,
@@ -68,6 +69,8 @@ from src.adb_capture import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+ENTRY_EXTRACT_MODE = "ppq_ocr_required_fuzzy_no_ui_filter"
 
 
 @dataclass
@@ -90,6 +93,8 @@ class CaptureConfig:
     log_path: Path | None = None
     profile_wait_timeout: float = 12.0
     party_review_wait_timeout: float = 12.0
+    profile_party_review_entry_wait_timeout: float = 8.0
+    profile_party_review_entry_stable_hits: int = 2
     screen_poll_interval: float = 0.6
     screen_stable_hits: int = 2
     max_no_new_today_swipes: int = 3
@@ -180,6 +185,7 @@ class CaptureState:
                 "match_ids": [],
                 "saved_paths": [],
                 "debug_paths": [],
+                "failure_screenshot": None,
             },
         )
 
@@ -278,6 +284,10 @@ class DailyCaptureBot:
     @property
     def debug_matches_dir(self) -> Path:
         return self.run_dir / "debug_matches"
+
+    @property
+    def failures_dir(self) -> Path:
+        return self.config.output_dir / "failures"
 
     def should_debug_save_player(self, rank: int) -> bool:
         return (
@@ -385,6 +395,35 @@ class DailyCaptureBot:
             self.adb.save_png(path)
         return path
 
+    @staticmethod
+    def sanitize_failure_reason(reason: str) -> str:
+        return "".join(
+            ch if ch.isalnum() or ch in {"-", "_"} else "_"
+            for ch in reason.strip().lower()
+        ) or "unknown"
+
+    def save_failure_screenshot(self, rank: int, reason: str, img=None) -> Path | None:
+        out_dir = self.failures_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_reason = self.sanitize_failure_reason(reason)
+        path = out_dir / f"rank_{rank:02d}_{safe_reason}.png"
+        try:
+            if img is not None:
+                ok, buf = cv2.imencode(".png", img)
+                if ok:
+                    path.write_bytes(buf.tobytes())
+                    return path
+            self.adb.save_png(path)
+            return path
+        except Exception as exc:
+            self.log_event(
+                "rank_failure_screenshot_error",
+                rank=rank,
+                reason=reason,
+                error=str(exc),
+            )
+            return None
+
     def log_event(self, event: str, **payload) -> None:
         record = {
             "ts": datetime.now().isoformat(timespec="seconds"),
@@ -479,6 +518,7 @@ class DailyCaptureBot:
         *,
         skip_reason: str | None = None,
         failed: bool = False,
+        **extra: object,
     ) -> None:
         if failed:
             status = "failed"
@@ -486,12 +526,25 @@ class DailyCaptureBot:
             status = "skipped"
         else:
             status = "completed"
-        extra: dict[str, object] = {}
+        state_extra: dict[str, object] = dict(extra)
         if skip_reason:
-            extra["skip_reason"] = skip_reason
-        self.capture_state.set_rank_status(rank, status, **extra)
+            state_extra["skip_reason"] = skip_reason
+        self.capture_state.set_rank_status(rank, status, **state_extra)
         self.capture_state.current_rank = None
         self.save_state()
+
+    def record_rank_failure(self, rank: int, reason: str, *, img=None) -> None:
+        screenshot_path = self.save_failure_screenshot(rank, reason, img=img)
+        extra: dict[str, object] = {}
+        if screenshot_path is not None:
+            extra["failure_screenshot"] = str(screenshot_path)
+            self.log_event(
+                "rank_failure_screenshot",
+                rank=rank,
+                reason=reason,
+                path=str(screenshot_path),
+            )
+        self.mark_rank_completed(rank, failed=True, **extra)
 
     def record_rank_match_saved(
         self,
@@ -667,6 +720,7 @@ class DailyCaptureBot:
         if self._next_expected_rank <= 3:
             self._next_expected_rank = max(self._next_expected_rank, 4)
         stall_rounds = 0
+        last_visible_max_rank: int | None = None
         tap_x = SCROLL_PLAYER_TAPS[0][0]
         while self._next_expected_rank <= self.config.end_rank:
             if self._next_expected_rank in self._manual_skip_ranks:
@@ -693,12 +747,26 @@ class DailyCaptureBot:
                 self.stats.players_skipped_duplicate_rank += 1
                 self.log_event("ranking_entry_skip", rank=rank, reason=reason)
             if wait_reason:
+                visible_ranks = [entry.rank for entry in ranking_entries]
+                visible_max_rank = max(visible_ranks) if visible_ranks else None
                 self.log_event(
                     wait_reason,
                     next_target_rank=self._next_expected_rank,
-                    visible_ranks=[entry.rank for entry in ranking_entries],
+                    visible_ranks=visible_ranks,
+                    visible_max_rank=visible_max_rank,
+                    target_rank=self._next_expected_rank,
                 )
-                stall_rounds += 1
+                if wait_reason == "ranking_target_ahead":
+                    if visible_max_rank is not None and (
+                        last_visible_max_rank is None
+                        or visible_max_rank > last_visible_max_rank
+                    ):
+                        stall_rounds = 0
+                        last_visible_max_rank = visible_max_rank
+                    else:
+                        stall_rounds += 1
+                else:
+                    stall_rounds += 1
                 if stall_rounds >= self.config.max_ranking_stall_rounds:
                     self.log_event(
                         "ranking_stall_stop",
@@ -711,6 +779,7 @@ class DailyCaptureBot:
 
             if player_specs:
                 stall_rounds = 0
+                last_visible_max_rank = None
                 for rank, player_index, x, y in player_specs:
                     if rank > self.config.end_rank:
                         return
@@ -766,6 +835,63 @@ class DailyCaptureBot:
 
     def mark_player_processed(self, rank: int) -> None:
         self._processed_player_ranks.add(rank)
+
+    def open_party_review(
+        self,
+        rank: int,
+    ) -> tuple[ProfilePartyReviewEntryWaitResult, PartyReviewWaitResult]:
+        party_wait: PartyReviewWaitResult | None = None
+        entry_wait: ProfilePartyReviewEntryWaitResult | None = None
+        max_party_review_tap_attempts = 2
+        for tap_attempt in range(max_party_review_tap_attempts):
+            if tap_attempt > 0:
+                self.log_event(
+                    "party_review_tap_retry",
+                    rank=rank,
+                    attempt=tap_attempt + 1,
+                )
+            entry_wait = self.screen.wait_for_profile_party_review_entry(
+                self.adb,
+                timeout=self.config.profile_party_review_entry_wait_timeout,
+                poll=self.config.screen_poll_interval,
+                stable_hits=self.config.profile_party_review_entry_stable_hits,
+                verbose=self.config.verbose,
+            )
+            self.log_event(
+                "profile_party_review_entry_wait",
+                rank=rank,
+                attempt=tap_attempt + 1,
+                ready=entry_wait.ready,
+                stable=entry_wait.stable,
+                on_profile=entry_wait.on_profile,
+                elapsed_ms=entry_wait.elapsed_ms,
+                polls=entry_wait.polls,
+            )
+            self.adb.tap(*TAP_PROFILE_PARTY_REVIEW, delay=0)
+            party_wait = self.screen.wait_for_party_review(
+                self.adb,
+                timeout=self.config.party_review_wait_timeout,
+                poll=self.config.screen_poll_interval,
+                public_stable_hits=self.config.party_review_public_stable_hits,
+                private_stable_hits=self.config.party_review_private_stable_hits,
+                verbose=self.config.verbose,
+            )
+            if party_wait.state in {"private", "public"} and party_wait.stable:
+                break
+            if tap_attempt >= max_party_review_tap_attempts - 1:
+                break
+            still_on_profile = (
+                party_wait.img is not None
+                and self.screen.detect(party_wait.img) == SCREEN_PROFILE
+            )
+            if not still_on_profile:
+                break
+            if party_wait.state != "timeout" and party_wait.stable:
+                break
+
+        assert entry_wait is not None
+        assert party_wait is not None
+        return entry_wait, party_wait
 
     def process_player(self, rank: int, player_index: int, x: int, y: int) -> None:
         if rank < self._next_expected_rank:
@@ -862,27 +988,30 @@ class DailyCaptureBot:
             )
             if self.should_debug_save_player(rank):
                 self._debug_player_records.append(debug_record)
-            self.mark_rank_completed(rank, failed=True)
+            self.record_rank_failure(
+                rank,
+                "unexpected_screen",
+                img=profile_wait.img,
+            )
             self.emit_progress(rank, status="failed")
             self.recover_to_ranking()
             self._next_expected_rank = max(self._next_expected_rank, rank + 1)
             return
 
         self.mark_player_processed(rank)
-        self.adb.tap(*TAP_PROFILE_PARTY_REVIEW, delay=0)
-        party_wait = self.screen.wait_for_party_review(
-            self.adb,
-            timeout=self.config.party_review_wait_timeout,
-            poll=self.config.screen_poll_interval,
-            public_stable_hits=self.config.party_review_public_stable_hits,
-            private_stable_hits=self.config.party_review_private_stable_hits,
-            verbose=self.config.verbose,
-        )
+        entry_wait, party_wait = self.open_party_review(rank)
         party_review_path = self.save_debug_screenshot(
             rank,
             "party_review_wait",
             party_wait.img,
         )
+        debug_record["profile_party_review_entry_wait"] = {
+            "ready": entry_wait.ready,
+            "elapsed_ms": entry_wait.elapsed_ms,
+            "polls": entry_wait.polls,
+            "stable": entry_wait.stable,
+            "on_profile": entry_wait.on_profile,
+        }
         debug_record["party_review_wait"] = {
             "state": party_wait.state,
             "elapsed_ms": party_wait.elapsed_ms,
@@ -916,7 +1045,11 @@ class DailyCaptureBot:
         if party_wait.state == "timeout" or not party_wait.stable:
             self.stats.errors.append(f"rank {rank}: party review load timeout")
             self.log_event("player_skip", rank=rank, reason="party_review_timeout")
-            self.mark_rank_completed(rank, failed=True)
+            self.record_rank_failure(
+                rank,
+                "party_review_timeout",
+                img=party_wait.img,
+            )
             self.emit_progress(rank, status="failed")
             if self.should_debug_save_player(rank):
                 self._debug_player_records.append(debug_record)
@@ -927,8 +1060,6 @@ class DailyCaptureBot:
         if self.should_debug_save_player(rank):
             self._debug_player_records.append(debug_record)
 
-        self.adb.tap(*TAP_FILTER_PPQ)
-        time.sleep(self.config.tap_delay)
         self.process_player_matches(rank, player_index)
         self.back_to_ranking()
         self.stats.players_completed += 1
@@ -955,6 +1086,11 @@ class DailyCaptureBot:
                 rank=rank,
                 player_index=player_index,
             )
+            ocr_texts = [
+                str(item.get("text", "")).strip()
+                for item in details
+                if str(item.get("text", "")).strip()
+            ]
             for entry in entries:
                 if (
                     entry.normalized_datetime in seen_start_times_this_player
@@ -998,6 +1134,11 @@ class DailyCaptureBot:
                 today_dates=date_summary.today_dates,
                 before_target_dates=date_summary.before_target_dates,
                 today_count=len(date_summary.today_dates),
+                ocr_texts=ocr_texts,
+                entry_count=len(entries),
+                page_today_entry_count=len(page_today_entries),
+                entry_datetimes=[entry.normalized_datetime for entry in entries],
+                entry_extract_mode=ENTRY_EXTRACT_MODE,
                 new_entry_count=len(new_entries),
                 new_today_entry_count=len(today_entries),
                 processed_today_count=len(page_today_entries) - remaining_today_entry_count,
@@ -1083,6 +1224,8 @@ class DailyCaptureBot:
 
             if has_target_date_on_page(details, target_date):
                 if processed_any_today:
+                    no_new_today_swipes = 0
+                elif date_summary.today_dates and not page_today_entries:
                     no_new_today_swipes = 0
                 elif not today_entries:
                     no_new_today_swipes += 1

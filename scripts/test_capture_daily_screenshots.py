@@ -77,8 +77,10 @@ def test_extract_match_entries_pairs_duo_peak_and_time() -> None:
         return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
 
     details = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(30)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
         {"text": "07-0400:52", "score": 0.98, "box": quad(90)},
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(150)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
         {"text": "07-04 01:10", "score": 0.98, "box": quad(210)},
     ]
@@ -90,6 +92,84 @@ def test_extract_match_entries_pairs_duo_peak_and_time() -> None:
     assert entries[0].tap_y == 577
     assert entries[1].normalized_datetime == "07-04 01:10"
     assert entries[0].dedup_key != entries[1].dedup_key
+
+
+def test_extract_match_entries_skips_duo_peak_without_ppq() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-0400:52", "score": 0.98, "box": quad(90)},
+    ]
+    entries = extract_match_entries(details, roi, rank=4, player_index=1)
+    assert entries == []
+
+    filtered_entries = extract_match_entries(
+        details,
+        roi,
+        rank=4,
+        player_index=1,
+        require_ppq=False,
+    )
+    assert len(filtered_entries) == 1
+    assert filtered_entries[0].normalized_datetime == "07-04 00:52"
+
+
+def test_extract_match_entries_mixed_ppq_and_other_modes() -> None:
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(30)},
+        {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "其他玩法", "score": 0.99, "box": quad(150)},
+        {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
+    ]
+    entries = extract_match_entries(details, roi, rank=3, player_index=1)
+    assert len(entries) == 1
+    assert entries[0].normalized_datetime == "07-05 12:42"
+
+
+def test_extract_match_entries_merged_ocr_line() -> None:
+    """OCR may merge mode label into one line: 蛋仔碰碰棋一双人巅峰."""
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "蛋仔碰碰棋一双人巅峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-0605:35", "score": 0.98, "box": quad(90)},
+        {"text": "蛋仔碰碰棋一双人巅峰", "score": 0.99, "box": quad(180)},
+        {"text": "07-0604:15", "score": 0.98, "box": quad(210)},
+    ]
+    entries = extract_match_entries(details, roi, rank=17, player_index=1)
+    assert len(entries) == 2
+    assert entries[0].normalized_datetime == "07-06 05:35"
+    assert entries[1].normalized_datetime == "07-06 04:15"
+
+
+def test_extract_match_entries_fuzzy_ocr_typo() -> None:
+    """Common OCR typos like 蛋仔碰碰供双火额峰 should still match PPQ duo peak."""
+    roi = (400, 500, 900, 1100)
+
+    def quad(y: int) -> list[list[int]]:
+        return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
+
+    details = [
+        {"text": "蛋仔碰碰供双火额峰", "score": 0.99, "box": quad(60)},
+        {"text": "07-0602:51", "score": 0.98, "box": quad(90)},
+    ]
+    entries = extract_match_entries(details, roi, rank=17, player_index=1)
+    assert len(entries) == 1
+    assert entries[0].normalized_datetime == "07-06 02:51"
 
 
 def test_party_page_date_scan_without_duo_peak() -> None:
@@ -184,8 +264,10 @@ def test_should_exit_before_target_after_today_done() -> None:
         return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
 
     mixed_details = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(30)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
         {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "其他玩法", "score": 0.99, "box": quad(150)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
         {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
     ]
@@ -296,10 +378,12 @@ def test_filter_new_match_entries_skips_duplicate_start_time() -> None:
         return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
 
     page_one = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(30)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
         {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
     ]
     page_two = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(150)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
         {"text": "07-05 12:42", "score": 0.98, "box": quad(210)},
     ]
@@ -324,8 +408,10 @@ def test_should_exit_before_target_respects_start_times() -> None:
         return [[0, y], [10, y], [10, y + 5], [0, y + 5]]
 
     mixed_details = [
+        {"text": "蛋仔碰碰棋", "score": 0.99, "box": quad(30)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(60)},
         {"text": "07-05 12:42", "score": 0.98, "box": quad(90)},
+        {"text": "其他玩法", "score": 0.99, "box": quad(150)},
         {"text": "双人巅峰", "score": 0.99, "box": quad(180)},
         {"text": "07-04 22:45", "score": 0.98, "box": quad(210)},
     ]
@@ -387,6 +473,40 @@ def test_build_scroll_player_specs_for_rank_12_and_13() -> None:
 
 def test_swipe_ranking_one_player_constant() -> None:
     assert SWIPE_RANKING_ONE_PLAYER == (1000, 1000, 1000, 870, 500)
+
+
+def test_build_next_rank_spec_target_ahead_keeps_scrolling() -> None:
+    entries = [
+        RankingEntry(rank=65, tap_y=900, raw_text="65"),
+        RankingEntry(rank=66, tap_y=1000, raw_text="66"),
+    ]
+    specs, skipped, wait_reason = build_next_rank_spec(
+        entries,
+        next_target_rank=90,
+        end_rank=100,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == []
+    assert skipped == []
+    assert wait_reason == "ranking_target_ahead"
+
+
+def test_build_next_rank_spec_overshoot_returns_missing() -> None:
+    entries = [
+        RankingEntry(rank=91, tap_y=900, raw_text="91"),
+        RankingEntry(rank=92, tap_y=1000, raw_text="92"),
+    ]
+    specs, skipped, wait_reason = build_next_rank_spec(
+        entries,
+        next_target_rank=90,
+        end_rank=100,
+        processed_ranks=set(),
+        tap_x=700,
+    )
+    assert specs == []
+    assert skipped == []
+    assert wait_reason == "ranking_missing_expected_rank"
 
 
 def test_build_next_rank_spec_rejects_jump_to_larger_rank() -> None:
@@ -466,6 +586,37 @@ def test_capture_state_resume_and_preload_match_ids() -> None:
     assert "07-05 12:16|32:09" in bot._processed_match_ids
 
 
+def test_capture_state_resume_skips_to_next_failed_rank() -> None:
+    from scripts.capture_daily_screenshots import CaptureState, DailyCaptureBot, CaptureConfig
+
+    state = CaptureState.new(
+        run_id="20260706-180000",
+        target_date="07-05",
+        start_rank=62,
+        end_rank=100,
+    )
+    for rank in range(62, 65):
+        state.set_rank_status(rank, "completed" if rank == 62 else "skipped")
+    for rank in range(65, 90):
+        state.set_rank_status(rank, "skipped")
+    state.set_rank_status(90, "failed")
+
+    config = CaptureConfig(
+        output_dir=ROOT / "screenshots.test",
+        start_rank=62,
+        end_rank=100,
+        resume=True,
+    )
+    bot = DailyCaptureBot(config)
+    bot.capture_state = state
+    bot.run_id = state.run_id
+    bot.preload_from_state()
+
+    assert bot._next_expected_rank == 90
+    assert 64 in bot._processed_player_ranks
+    assert 90 not in bot._processed_player_ranks
+
+
 def test_output_isolation_run_dirs() -> None:
     from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
 
@@ -475,18 +626,85 @@ def test_output_isolation_run_dirs() -> None:
     bot.run_dir = config.output_dir / "runs" / bot.run_id
     assert bot.debug_matches_dir == config.output_dir / "runs" / "run_a" / "debug_matches"
     assert bot.debug_players_dir == config.output_dir / "runs" / "run_a" / "debug_players"
+    assert bot.failures_dir == config.output_dir / "failures"
+    assert bot.failures_dir != config.output_dir
+
+
+def test_save_failure_screenshot_uses_isolated_failures_dir() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+
+    output_dir = ROOT / "screenshots.test" / "failure_screenshot_test"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    path = bot.save_failure_screenshot(17, "unexpected_screen", img=img)
+
+    assert path is not None
+    assert path.parent == output_dir / "failures"
+    assert path.name == "rank_17_unexpected_screen.png"
+    assert path.exists()
+    assert path.parent != output_dir
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_record_rank_failure_writes_state_and_event() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+
+    output_dir = ROOT / "screenshots.test" / "record_rank_failure_test"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "20260707-test"
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    bot.record_rank_failure(42, "party_review_timeout", img=img)
+
+    record = bot.capture_state.get_rank_record(42)
+    assert record["status"] == "failed"
+    assert record["failure_screenshot"] is not None
+    assert record["failure_screenshot"].endswith("rank_42_party_review_timeout.png")
+    assert any(event["event"] == "rank_failure_screenshot" for event in bot.events)
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_sanitize_failure_reason() -> None:
+    from scripts.capture_daily_screenshots import DailyCaptureBot
+
+    assert DailyCaptureBot.sanitize_failure_reason("Party Review Timeout") == "party_review_timeout"
+    assert DailyCaptureBot.sanitize_failure_reason("unexpected/screen") == "unexpected_screen"
+
+
+def test_entry_extract_mode_constant() -> None:
+    from scripts.capture_daily_screenshots import ENTRY_EXTRACT_MODE
+
+    assert ENTRY_EXTRACT_MODE == "ppq_ocr_required_fuzzy_no_ui_filter"
 
 
 def test_load_manual_skip_ranks() -> None:
     from scripts.capture_daily_screenshots import load_manual_skip_ranks
 
-    skip_path = ROOT / "data" / "capture_skip_players.json"
+    skip_path = ROOT / "screenshots.test" / "capture_skip_players_test.json"
+    skip_path.parent.mkdir(parents=True, exist_ok=True)
+    if skip_path.exists():
+        skip_path.unlink()
     assert load_manual_skip_ranks(skip_path) == set()
     skip_path.write_text("[9, 11, 13, 15]", encoding="utf-8")
     try:
         assert load_manual_skip_ranks(skip_path) == {9, 11, 13, 15}
     finally:
-        skip_path.write_text("[]", encoding="utf-8")
+        skip_path.unlink(missing_ok=True)
 
 
 def test_mumu_filename_format() -> None:
@@ -547,6 +765,106 @@ def test_check_device_reports_all_failures() -> None:
         assert "No healthy adb device found" in message
 
 
+def test_has_profile_party_review_entry_on_failure_screenshot() -> None:
+    import cv2
+
+    from src.adb_capture import OcrHelper, SCREEN_PROFILE, ScreenDetector
+
+    img_path = ROOT / "screenshots.0707" / "failures" / "rank_23_party_review_timeout.png"
+    if not img_path.exists():
+        return
+    img = cv2.imread(str(img_path))
+    assert img is not None
+    detector = ScreenDetector(OcrHelper())
+    assert detector.detect(img) == SCREEN_PROFILE
+    assert detector.has_profile_party_review_entry(img) is True
+
+
+def test_wait_for_profile_party_review_entry_waits_for_stable_hits() -> None:
+    import numpy as np
+
+    from src.adb_capture import AdbClient, OcrHelper, SCREEN_PROFILE, ScreenDetector
+
+    img = np.zeros((1600, 2160, 3), dtype=np.uint8)
+    adb = AdbClient()
+    adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+
+    detector = ScreenDetector(OcrHelper())
+    poll_count = {"value": 0}
+
+    def has_entry(_img: np.ndarray) -> bool:
+        poll_count["value"] += 1
+        return poll_count["value"] >= 3
+
+    detector.detect = lambda _img, verbose=False: SCREEN_PROFILE  # type: ignore[method-assign]
+    detector.has_profile_party_review_entry = has_entry  # type: ignore[method-assign]
+
+    result = detector.wait_for_profile_party_review_entry(
+        adb,
+        timeout=5.0,
+        poll=0.01,
+        stable_hits=2,
+    )
+    assert result.stable is True
+    assert result.ready is True
+    assert result.polls >= 4
+
+
+def test_open_party_review_retries_tap_when_still_on_profile() -> None:
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        PartyReviewWaitResult,
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        TAP_PROFILE_PARTY_REVIEW,
+    )
+
+    config = CaptureConfig(output_dir=ROOT / "screenshots.test")
+    bot = DailyCaptureBot(config)
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
+
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=True,
+        img=img,
+        elapsed_ms=100,
+        polls=2,
+        stable=True,
+        on_profile=True,
+    )
+    bot.screen.wait_for_profile_party_review_entry = lambda *args, **kwargs: entry_wait  # type: ignore[method-assign]
+    party_waits = [
+        PartyReviewWaitResult(
+            state="timeout",
+            img=img,
+            elapsed_ms=12000,
+            polls=20,
+            stable=False,
+        ),
+        PartyReviewWaitResult(
+            state="public",
+            img=img,
+            elapsed_ms=800,
+            polls=2,
+            stable=True,
+        ),
+    ]
+    bot.screen.wait_for_party_review = lambda *args, **kwargs: party_waits.pop(0)  # type: ignore[method-assign]
+    bot.screen.detect = lambda _img: SCREEN_PROFILE  # type: ignore[method-assign]
+
+    entry_result, party_result = bot.open_party_review(rank=23)
+
+    assert len(taps) == 2
+    assert taps == [TAP_PROFILE_PARTY_REVIEW, TAP_PROFILE_PARTY_REVIEW]
+    assert entry_result.stable is True
+    assert party_result.state == "public"
+    assert party_result.stable is True
+    assert any(event["event"] == "party_review_tap_retry" for event in bot.events)
+
+
 def test_get_screen_size_error_includes_serial() -> None:
     import subprocess
 
@@ -575,6 +893,10 @@ if __name__ == "__main__":
     test_make_global_match_id()
     test_parse_visible_ranks()
     test_extract_match_entries_pairs_duo_peak_and_time()
+    test_extract_match_entries_skips_duo_peak_without_ppq()
+    test_extract_match_entries_mixed_ppq_and_other_modes()
+    test_extract_match_entries_merged_ocr_line()
+    test_extract_match_entries_fuzzy_ocr_typo()
     test_party_page_date_scan_without_duo_peak()
     test_cross_year_capture_date_resolution()
     test_same_year_backfill_date_resolution()
@@ -594,6 +916,10 @@ if __name__ == "__main__":
     test_compute_next_target_rank_skips_manual_and_completed()
     test_capture_state_resume_and_preload_match_ids()
     test_output_isolation_run_dirs()
+    test_save_failure_screenshot_uses_isolated_failures_dir()
+    test_record_rank_failure_writes_state_and_event()
+    test_sanitize_failure_reason()
+    test_entry_extract_mode_constant()
     test_load_manual_skip_ranks()
     test_filter_new_match_entries_skips_duplicate_start_time()
     test_should_exit_before_target_respects_start_times()
@@ -603,5 +929,8 @@ if __name__ == "__main__":
     test_check_device_falls_back_when_mumu_tcp_closed()
     test_check_device_fails_when_preferred_serial_unhealthy()
     test_check_device_reports_all_failures()
+    test_has_profile_party_review_entry_on_failure_screenshot()
+    test_wait_for_profile_party_review_entry_waits_for_stable_hits()
+    test_open_party_review_retries_tap_when_still_on_profile()
     test_get_screen_size_error_includes_serial()
     print("all tests passed")
