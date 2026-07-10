@@ -836,6 +836,91 @@ class DailyCaptureBot:
     def mark_player_processed(self, rank: int) -> None:
         self._processed_player_ranks.add(rank)
 
+    def _confirm_unstable_profile_entry(
+        self,
+        rank: int,
+    ) -> ProfilePartyReviewEntryWaitResult:
+        entry_wait = self.screen.wait_for_profile_party_review_entry(
+            self.adb,
+            timeout=self.config.profile_party_review_entry_wait_timeout,
+            poll=self.config.screen_poll_interval,
+            stable_hits=self.config.profile_party_review_entry_stable_hits,
+            verbose=self.config.verbose,
+        )
+        self.log_event(
+            "profile_party_review_entry_recover",
+            rank=rank,
+            ready=entry_wait.ready,
+            stable=entry_wait.stable,
+            on_profile=entry_wait.on_profile,
+            elapsed_ms=entry_wait.elapsed_ms,
+            polls=entry_wait.polls,
+        )
+        return entry_wait
+
+    def _profile_open_failure_reason(
+        self,
+        profile_wait,
+        entry_wait: ProfilePartyReviewEntryWaitResult | None,
+    ) -> str:
+        if profile_wait.screen == SCREEN_PROFILE:
+            if entry_wait is not None and not entry_wait.ready:
+                return "profile_entry_timeout"
+            return "profile_unstable"
+        return "unexpected_screen"
+
+    def _record_profile_open_failure(
+        self,
+        rank: int,
+        *,
+        reason: str,
+        profile_wait,
+        debug_record: dict,
+        entry_wait: ProfilePartyReviewEntryWaitResult | None = None,
+    ) -> None:
+        should_mark_processed = (
+            reason == "unexpected_screen"
+            and profile_wait.stable
+            and profile_wait.screen != SCREEN_UNKNOWN
+        )
+        if should_mark_processed:
+            self.mark_player_processed(rank)
+        error_messages = {
+            "unexpected_screen": (
+                f"rank {rank}: expected profile, got {profile_wait.screen}"
+            ),
+            "profile_unstable": (
+                f"rank {rank}: profile unstable before party-review entry ready"
+            ),
+            "profile_entry_timeout": (
+                f"rank {rank}: profile party-review entry timeout"
+            ),
+        }
+        self.stats.errors.append(
+            error_messages.get(reason, f"rank {rank}: profile open failure ({reason})")
+        )
+        payload: dict[str, object] = {
+            "rank": rank,
+            "reason": reason,
+            "screen": profile_wait.screen,
+            "stable": profile_wait.stable,
+            "marked_processed": should_mark_processed,
+        }
+        if entry_wait is not None:
+            payload["entry_ready"] = entry_wait.ready
+            payload["entry_on_profile"] = entry_wait.on_profile
+            payload["entry_stable"] = entry_wait.stable
+        self.log_event("player_error", **payload)
+        if self.should_debug_save_player(rank):
+            self._debug_player_records.append(debug_record)
+        failure_img = profile_wait.img
+        if entry_wait is not None and entry_wait.img is not None:
+            failure_img = entry_wait.img
+        self.record_rank_failure(rank, reason, img=failure_img)
+        self.emit_progress(rank, status="failed")
+        self.recover_to_ranking()
+        self._next_expected_rank = max(self._next_expected_rank, rank + 1)
+
     def open_party_review(
         self,
         rank: int,
@@ -923,7 +1008,7 @@ class DailyCaptureBot:
             {SCREEN_PROFILE, SCREEN_RANKING},
             timeout=self.config.profile_wait_timeout,
             poll=self.config.screen_poll_interval,
-            stable_hits=self.config.screen_stable_hits,
+            stable_hits=1,
             verbose=self.config.verbose,
         )
         after_tap_path = self.save_debug_screenshot(
@@ -968,34 +1053,31 @@ class DailyCaptureBot:
                 self._debug_player_records.append(debug_record)
             self._next_expected_rank = max(self._next_expected_rank, rank + 1)
             return
-        if profile_wait.screen != SCREEN_PROFILE or not profile_wait.stable:
-            should_mark_processed = (
-                profile_wait.stable
-                and profile_wait.screen != SCREEN_UNKNOWN
-            )
-            if should_mark_processed:
-                self.mark_player_processed(rank)
-            self.stats.errors.append(
-                f"rank {rank}: expected profile, got {profile_wait.screen}"
-            )
-            self.log_event(
-                "player_error",
-                rank=rank,
-                reason="unexpected_screen",
-                screen=profile_wait.screen,
-                stable=profile_wait.stable,
-                marked_processed=should_mark_processed,
-            )
-            if self.should_debug_save_player(rank):
-                self._debug_player_records.append(debug_record)
-            self.record_rank_failure(
+        if profile_wait.screen == SCREEN_PROFILE and not profile_wait.stable:
+            entry_wait = self._confirm_unstable_profile_entry(rank)
+            if entry_wait.ready and entry_wait.on_profile:
+                self.log_event(
+                    "profile_unstable_but_entry_ready",
+                    rank=rank,
+                    elapsed_ms=entry_wait.elapsed_ms,
+                    polls=entry_wait.polls,
+                )
+            else:
+                self._record_profile_open_failure(
+                    rank,
+                    reason=self._profile_open_failure_reason(profile_wait, entry_wait),
+                    profile_wait=profile_wait,
+                    debug_record=debug_record,
+                    entry_wait=entry_wait,
+                )
+                return
+        elif profile_wait.screen != SCREEN_PROFILE:
+            self._record_profile_open_failure(
                 rank,
-                "unexpected_screen",
-                img=profile_wait.img,
+                reason="unexpected_screen",
+                profile_wait=profile_wait,
+                debug_record=debug_record,
             )
-            self.emit_progress(rank, status="failed")
-            self.recover_to_ranking()
-            self._next_expected_rank = max(self._next_expected_rank, rank + 1)
             return
 
         self.mark_player_processed(rank)

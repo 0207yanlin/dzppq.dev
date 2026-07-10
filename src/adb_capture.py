@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import logging
+import queue
 import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -1031,16 +1033,27 @@ class WarmupResult:
     error: str | None = None
 
 
+@dataclass
+class _WorkerTask:
+    fn: Callable[[], Any]
+    done: threading.Event = field(default_factory=threading.Event)
+    result: Any = None
+    error: BaseException | None = None
+
+
 class OcrHelper:
     def __init__(self, *, use_cls: bool = True) -> None:
         self._local = threading.local()
         self._backend: str | None = None
         self._use_cls = use_cls
         self._init_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
+        self._task_queue: queue.Queue[_WorkerTask | None] | None = None
+        self._worker_thread: threading.Thread | None = None
         self._warmup_lock = threading.Lock()
-        self._warmup_thread: threading.Thread | None = None
         self._warmup_done = threading.Event()
         self._warmup_result: WarmupResult | None = None
+        self._warmup_queued = False
 
     def _create_engine(self) -> Any:
         rapidocr_error: Exception | None = None
@@ -1143,20 +1156,80 @@ class OcrHelper:
                 error=str(exc),
             )
 
+    def _ensure_worker(self) -> None:
+        with self._worker_lock:
+            if self._worker_thread is not None and self._worker_thread.is_alive():
+                return
+            self._task_queue = queue.Queue()
+            self._worker_thread = threading.Thread(
+                target=self._worker_loop,
+                name="ocr-worker",
+                daemon=True,
+            )
+            self._worker_thread.start()
+
+    def _worker_loop(self) -> None:
+        assert self._task_queue is not None
+        while True:
+            task = self._task_queue.get()
+            if task is None:
+                self._task_queue.task_done()
+                break
+            try:
+                task.result = task.fn()
+            except BaseException as exc:
+                task.error = exc
+            finally:
+                task.done.set()
+                self._task_queue.task_done()
+
+    def _submit(self, fn: Callable[[], Any], *, timeout: float | None = 120.0) -> Any:
+        self._ensure_worker()
+        assert self._task_queue is not None
+        task = _WorkerTask(fn=fn)
+        self._task_queue.put(task)
+        if not task.done.wait(timeout):
+            raise TimeoutError("OCR task did not finish in time")
+        if task.error is not None:
+            raise task.error
+        return task.result
+
+    def _submit_async(self, fn: Callable[[], Any]) -> None:
+        self._ensure_worker()
+        assert self._task_queue is not None
+        self._task_queue.put(_WorkerTask(fn=fn))
+
+    def _queue_warmup_if_needed(self) -> None:
+        with self._warmup_lock:
+            if self._warmup_result is not None or self._warmup_queued:
+                return
+            self._warmup_queued = True
+
+            def _do_warmup() -> WarmupResult:
+                result = self._run_warmup_once()
+                self._warmup_result = result
+                self._warmup_done.set()
+                return result
+
+            self._submit_async(_do_warmup)
+
+    def run_on_ocr_thread(
+        self,
+        fn: Callable[[], Any],
+        *,
+        timeout: float | None = 120.0,
+    ) -> Any:
+        """Run *fn* on the OCR worker thread so it reuses the warmed-up engine."""
+        return self._submit(fn, timeout=timeout)
+
     def warmup(self, *, blocking: bool = False, timeout: float | None = 120.0) -> WarmupResult | None:
-        """Preload OCR models. Returns result when blocking=True."""
+        """Preload OCR models on the OCR worker thread. Returns result when blocking=True."""
         with self._warmup_lock:
             if self._warmup_result is not None:
                 return self._warmup_result
-            if self._warmup_thread is None or not self._warmup_thread.is_alive():
-                self._warmup_thread = threading.Thread(
-                    target=self._warmup_worker,
-                    name="ocr-warmup",
-                    daemon=True,
-                )
-                self._warmup_thread.start()
-            if not blocking:
-                return None
+        self._queue_warmup_if_needed()
+        if not blocking:
+            return None
         finished = self._warmup_done.wait(timeout)
         result = self._warmup_result
         if not finished or result is None:
@@ -1164,11 +1237,6 @@ class OcrHelper:
         if not result.success:
             raise RuntimeError(result.error or "OCR warmup failed")
         return result
-
-    def _warmup_worker(self) -> None:
-        result = self._run_warmup_once()
-        self._warmup_result = result
-        self._warmup_done.set()
 
     def start_warmup_async(self) -> None:
         """Start OCR warmup in the background if not already started."""

@@ -10,7 +10,7 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import cv2
 import numpy as np
@@ -39,6 +39,7 @@ from src.runtime_paths import (  # noqa: E402
     resolve_meta_json,
     runtime_build_label,
 )
+from src.user_settings import clear_saved_adb_bin, get_saved_adb_bin, save_adb_bin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,29 @@ class AdbRuntimeOptions:
 
 def resolve_adb_bin(adb_bin: str | None) -> str | None:
     """Return adb.exe path if found, else None."""
-    path = Path(adb_bin or DEFAULT_ADB_BIN)
-    return str(path) if path.is_file() else None
+    resolved, _source = resolve_adb_bin_with_source(adb_bin)
+    return resolved
+
+
+def resolve_adb_bin_with_source(adb_bin: str | None) -> tuple[str | None, str]:
+    """Resolve adb.exe using CLI > saved settings > default MuMu path."""
+    if adb_bin:
+        path = Path(adb_bin)
+        if path.is_file():
+            return str(path.resolve()), "命令行"
+        return None, "命令行（无效）"
+
+    saved = get_saved_adb_bin()
+    if saved:
+        path = Path(saved)
+        if path.is_file():
+            return str(path.resolve()), "已保存配置"
+        return None, "已保存配置（无效）"
+
+    default = Path(DEFAULT_ADB_BIN)
+    if default.is_file():
+        return str(default.resolve()), "默认路径"
+    return None, "未找到"
 
 
 def build_adb_client(options: AdbRuntimeOptions, *, verbose: bool = False) -> AdbClient:
@@ -155,6 +177,8 @@ class CardPickRecommenderApp:
         data_path: Path,
         data_mode: str,
         adb_bin_path: str | None,
+        adb_source: str,
+        adb_config_locked: bool = False,
         save_debug_roi: Path | None = None,
     ) -> None:
         self.adb = adb
@@ -164,6 +188,8 @@ class CardPickRecommenderApp:
         self.data_path = data_path
         self.data_mode = data_mode
         self.adb_bin_path = adb_bin_path
+        self.adb_source = adb_source
+        self.adb_config_locked = adb_config_locked
         self.save_debug_roi = save_debug_roi
         self.build_label = runtime_build_label(
             entry_script=Path(__file__).resolve(),
@@ -178,7 +204,7 @@ class CardPickRecommenderApp:
 
         self.root = tk.Tk()
         self.root.title("DZPPQ 卡牌推荐")
-        self.root.geometry("820x680")
+        self.root.geometry("820x720")
         self.root.attributes("-topmost", True)
         self._build_ui()
         self._poll_ocr_warmup()
@@ -223,14 +249,7 @@ class CardPickRecommenderApp:
         self.prefix_var = tk.StringVar(value="尚未开始")
         ttk.Label(self.root, textvariable=self.prefix_var).pack(anchor="w", padx=12)
 
-        adb_hint = self.adb_bin_path or DEFAULT_ADB_BIN
-        connect_hint = (
-            f"ADB: {adb_hint} | 推荐前自动连接 "
-            f"{self.adb_options.mumu_host}:{self.adb_options.mumu_port}"
-        )
-        if not self.adb_bin_path:
-            connect_hint += "（未找到 adb.exe，开始推荐时会报错）"
-        ttk.Label(self.root, text=connect_hint, wraplength=720).pack(anchor="w", padx=12)
+        self._build_adb_config_ui()
 
         meta = self.stats
         data_kind = "数据库" if self.data_mode == "db" else "JSON"
@@ -268,6 +287,135 @@ class CardPickRecommenderApp:
         self.result_text.insert("1.0", "点击「开始推荐」，然后选择卡牌类别。\n")
         self.result_text.configure(state="disabled")
 
+    def _build_adb_config_ui(self) -> None:
+        adb_frame = ttk.LabelFrame(self.root, text="ADB 配置")
+        adb_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        path_row = ttk.Frame(adb_frame)
+        path_row.pack(fill="x", padx=8, pady=(8, 4))
+
+        ttk.Label(path_row, text="adb.exe:").pack(side="left")
+        initial_path = self.adb_bin_path or get_saved_adb_bin() or DEFAULT_ADB_BIN
+        self.adb_path_var = tk.StringVar(value=initial_path)
+        self.adb_path_entry = ttk.Entry(path_row, textvariable=self.adb_path_var)
+        self.adb_path_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+
+        btn_row = ttk.Frame(adb_frame)
+        btn_row.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.adb_browse_btn = ttk.Button(btn_row, text="浏览...", command=self._on_browse_adb)
+        self.adb_browse_btn.pack(side="left")
+        self.adb_apply_btn = ttk.Button(btn_row, text="应用", command=self._on_apply_adb)
+        self.adb_apply_btn.pack(side="left", padx=(6, 0))
+        self.adb_save_btn = ttk.Button(btn_row, text="保存", command=self._on_save_adb)
+        self.adb_save_btn.pack(side="left", padx=(6, 0))
+        self.adb_reset_btn = ttk.Button(btn_row, text="恢复默认", command=self._on_reset_adb)
+        self.adb_reset_btn.pack(side="left", padx=(6, 0))
+
+        self.adb_status_var = tk.StringVar(value=self._format_adb_status())
+        ttk.Label(adb_frame, textvariable=self.adb_status_var, wraplength=760).pack(
+            anchor="w",
+            padx=8,
+            pady=(0, 8),
+        )
+
+        if self.adb_config_locked:
+            self.adb_path_entry.configure(state="disabled")
+            for widget in (
+                self.adb_browse_btn,
+                self.adb_apply_btn,
+                self.adb_save_btn,
+                self.adb_reset_btn,
+            ):
+                widget.configure(state="disabled")
+
+    def _format_adb_status(self) -> str:
+        connect_hint = (
+            f"来源: {self.adb_source} | 推荐前自动连接 "
+            f"{self.adb_options.mumu_host}:{self.adb_options.mumu_port}"
+        )
+        if self.adb_config_locked:
+            connect_hint += " | 当前由命令行参数锁定"
+        elif self.adb_bin_path:
+            connect_hint += " | 路径有效"
+        else:
+            connect_hint += " | 未找到 adb.exe，请浏览选择 MuMu 自带的 adb.exe"
+        return connect_hint
+
+    def _refresh_adb_status(self) -> None:
+        self.adb_status_var.set(self._format_adb_status())
+
+    def _apply_adb_path(self, path_text: str, *, source: str) -> bool:
+        path = Path(path_text.strip())
+        if not path.is_file():
+            self.adb_bin_path = None
+            self.adb_source = f"{source}（无效）"
+            self.adb.adb_bin = DEFAULT_ADB_BIN
+            self.adb_options.adb_bin = None
+            self._refresh_adb_status()
+            return False
+
+        resolved = str(path.resolve())
+        self.adb_bin_path = resolved
+        self.adb_source = source
+        self.adb.adb_bin = resolved
+        self.adb_options.adb_bin = resolved
+        self.adb_path_var.set(resolved)
+        self._refresh_adb_status()
+        logger.info("ADB path applied: %s (%s)", resolved, source)
+        return True
+
+    def _on_browse_adb(self) -> None:
+        initial = self.adb_path_var.get().strip() or DEFAULT_ADB_BIN
+        initial_dir = str(Path(initial).parent) if Path(initial).parent.is_dir() else str(app_base_dir())
+        selected = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择 adb.exe",
+            initialdir=initial_dir,
+            filetypes=[("ADB executable", "adb.exe"), ("Executable", "*.exe"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        self.adb_path_var.set(selected)
+        if self._apply_adb_path(selected, source="手动选择"):
+            self.status_var.set("ADB 路径已更新")
+
+    def _on_apply_adb(self) -> None:
+        path_text = self.adb_path_var.get()
+        if self._apply_adb_path(path_text, source="手动输入"):
+            self.status_var.set("ADB 路径已应用")
+        else:
+            messagebox.showerror(
+                "无效 ADB 路径",
+                f"找不到 adb.exe:\n{path_text}\n\n"
+                "请选择 MuMu 安装目录下的 adb.exe，例如：\n"
+                f"{DEFAULT_ADB_BIN}",
+            )
+
+    def _on_save_adb(self) -> None:
+        path_text = self.adb_path_var.get()
+        if not self._apply_adb_path(path_text, source="已保存配置"):
+            messagebox.showerror(
+                "无法保存",
+                f"找不到 adb.exe:\n{path_text}\n\n请先选择有效路径后再保存。",
+            )
+            return
+        save_adb_bin(self.adb_bin_path or path_text)
+        self.status_var.set("ADB 路径已保存")
+
+    def _on_reset_adb(self) -> None:
+        if self.adb_config_locked:
+            return
+        clear_saved_adb_bin()
+        self.adb_path_var.set(DEFAULT_ADB_BIN)
+        if self._apply_adb_path(DEFAULT_ADB_BIN, source="默认路径"):
+            self.status_var.set("已恢复默认 ADB 路径")
+        else:
+            self.adb_source = "未找到"
+            self.adb_bin_path = None
+            self._refresh_adb_status()
+            self.status_var.set("默认 ADB 路径不存在，请手动选择")
+
     def run(self) -> None:
         self.root.mainloop()
 
@@ -284,8 +432,9 @@ class CardPickRecommenderApp:
         if not self.adb_bin_path:
             messagebox.showerror(
                 "缺少 ADB",
-                f"未找到 adb.exe: {DEFAULT_ADB_BIN}\n"
-                "请确认 MuMu 已安装，或通过 --adb-bin 指定 adb.exe 路径。",
+                f"未找到 adb.exe。\n\n"
+                f"默认路径: {DEFAULT_ADB_BIN}\n\n"
+                "请在上方「ADB 配置」中浏览选择 MuMu 自带的 adb.exe，然后点击「保存」。",
             )
             return
         dialog = PrefixPickerDialog(self.root)
@@ -326,7 +475,9 @@ class CardPickRecommenderApp:
             if not self.ocr.warmup_finished:
                 self.root.after(0, lambda: self.status_var.set("等待 OCR 预加载..."))
             self.ocr.ensure_ready()
-            cards = recognize_hand_cards(img, self.ocr, prefix, self.stats)
+            cards = self.ocr.run_on_ocr_thread(
+                lambda: recognize_hand_cards(img, self.ocr, prefix, self.stats)
+            )
             t_ocr = time.perf_counter()
             self.last_cards = cards
             result = build_recommendation(prefix, cards, self.stats)
@@ -529,7 +680,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     adb_options = adb_options_from_args(args)
-    adb_bin_path = resolve_adb_bin(adb_options.adb_bin)
+    cli_adb_bin = args.adb_bin
+    adb_bin_path, adb_source = resolve_adb_bin_with_source(cli_adb_bin)
+    if adb_bin_path:
+        adb_options.adb_bin = adb_bin_path
     adb = build_adb_client(adb_options, verbose=args.verbose)
 
     if adb_options.connect_at_start and adb_bin_path:
@@ -550,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
         data_path=data_path,
         data_mode=data_mode,
         adb_bin_path=adb_bin_path,
+        adb_source=adb_source,
+        adb_config_locked=cli_adb_bin is not None,
         save_debug_roi=args.save_debug_roi,
     )
     logger.info(

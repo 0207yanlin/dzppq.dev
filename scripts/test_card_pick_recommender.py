@@ -599,6 +599,40 @@ def test_ocr_helper_warmup_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["count"] == 1
 
 
+def test_ocr_helper_reuses_worker_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.adb_capture import OcrHelper
+
+    init_count = {"count": 0}
+
+    class FakeEngine:
+        def __call__(self, patch: object, **kwargs: object) -> tuple[list, None]:
+            return [], None
+
+    def fake_create(self: OcrHelper) -> FakeEngine:
+        init_count["count"] += 1
+        self._backend = "rapidocr"
+        return FakeEngine()
+
+    monkeypatch.setattr(OcrHelper, "_create_engine", fake_create)
+
+    helper = OcrHelper(use_cls=False)
+    helper.start_warmup_async()
+    helper.ensure_ready(timeout=5.0)
+    assert init_count["count"] == 1
+
+    def ocr_job() -> str:
+        import numpy as np
+
+        dummy = np.zeros((32, 128, 3), dtype=np.uint8)
+        return helper.ocr_text(dummy)
+
+    helper.run_on_ocr_thread(ocr_job)
+    assert init_count["count"] == 1
+
+    helper.run_on_ocr_thread(ocr_job)
+    assert init_count["count"] == 1
+
+
 def test_resolve_meta_json_from_project_root() -> None:
     path = resolve_meta_json()
     assert path.is_file()
@@ -722,6 +756,85 @@ def test_ensure_adb_session_skips_connect_when_disabled() -> None:
     assert calls == ["check"]
 
 
+def test_resolve_adb_bin_with_source_cli_priority(tmp_path: Path) -> None:
+    from scripts.card_pick_recommender import resolve_adb_bin_with_source
+
+    cli_adb = tmp_path / "cli_adb.exe"
+    cli_adb.write_bytes(b"")
+    saved_adb = tmp_path / "saved_adb.exe"
+    saved_adb.write_bytes(b"")
+    default_adb = tmp_path / "default_adb.exe"
+    default_adb.write_bytes(b"")
+
+    with patch("scripts.card_pick_recommender.get_saved_adb_bin", return_value=str(saved_adb)), patch(
+        "scripts.card_pick_recommender.DEFAULT_ADB_BIN", str(default_adb)
+    ):
+        resolved, source = resolve_adb_bin_with_source(str(cli_adb))
+    assert resolved == str(cli_adb.resolve())
+    assert source == "命令行"
+
+
+def test_resolve_adb_bin_with_source_saved_config(tmp_path: Path) -> None:
+    from scripts.card_pick_recommender import resolve_adb_bin_with_source
+
+    saved_adb = tmp_path / "saved_adb.exe"
+    saved_adb.write_bytes(b"")
+    default_adb = tmp_path / "default_adb.exe"
+    default_adb.write_bytes(b"")
+
+    with patch("scripts.card_pick_recommender.get_saved_adb_bin", return_value=str(saved_adb)), patch(
+        "scripts.card_pick_recommender.DEFAULT_ADB_BIN", str(default_adb)
+    ):
+        resolved, source = resolve_adb_bin_with_source(None)
+    assert resolved == str(saved_adb.resolve())
+    assert source == "已保存配置"
+
+
+def test_resolve_adb_bin_with_source_default_fallback(tmp_path: Path) -> None:
+    from scripts.card_pick_recommender import resolve_adb_bin_with_source
+
+    default_adb = tmp_path / "default_adb.exe"
+    default_adb.write_bytes(b"")
+
+    with patch("scripts.card_pick_recommender.get_saved_adb_bin", return_value=None), patch(
+        "scripts.card_pick_recommender.DEFAULT_ADB_BIN", str(default_adb)
+    ):
+        resolved, source = resolve_adb_bin_with_source(None)
+    assert resolved == str(default_adb.resolve())
+    assert source == "默认路径"
+
+
+def test_resolve_adb_bin_with_source_invalid_paths(tmp_path: Path) -> None:
+    from scripts.card_pick_recommender import resolve_adb_bin_with_source
+
+    with patch("scripts.card_pick_recommender.get_saved_adb_bin", return_value=str(tmp_path / "missing.exe")), patch(
+        "scripts.card_pick_recommender.DEFAULT_ADB_BIN", str(tmp_path / "also_missing.exe")
+    ):
+        resolved, source = resolve_adb_bin_with_source(None)
+    assert resolved is None
+    assert source == "已保存配置（无效）"
+
+    resolved, source = resolve_adb_bin_with_source(str(tmp_path / "missing_cli.exe"))
+    assert resolved is None
+    assert source == "命令行（无效）"
+
+
+def test_user_settings_save_and_clear_adb_bin(tmp_path: Path) -> None:
+    from src.user_settings import clear_saved_adb_bin, get_saved_adb_bin, save_adb_bin, settings_path
+
+    fake_exe = tmp_path / "DZPPQCardRecommender.exe"
+    fake_exe.write_bytes(b"")
+
+    with patch("src.user_settings.app_base_dir", return_value=tmp_path):
+        assert get_saved_adb_bin() is None
+        save_adb_bin(r"D:\MuMu\nx_main\adb.exe")
+        assert get_saved_adb_bin() == r"D:\MuMu\nx_main\adb.exe"
+        assert settings_path().is_file()
+        clear_saved_adb_bin()
+        assert get_saved_adb_bin() is None
+        assert not settings_path().exists()
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -742,4 +855,11 @@ if __name__ == "__main__":
     test_ensure_adb_session_auto_connects()
     test_ensure_adb_session_skips_connect_when_disabled()
     test_load_real_meta_json_if_present()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        test_resolve_adb_bin_with_source_cli_priority(tmp_path)
+        test_resolve_adb_bin_with_source_saved_config(tmp_path)
+        test_resolve_adb_bin_with_source_default_fallback(tmp_path)
+        test_resolve_adb_bin_with_source_invalid_paths(tmp_path)
+        test_user_settings_save_and_clear_adb_bin(tmp_path)
     print("all tests passed")

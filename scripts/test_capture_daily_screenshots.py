@@ -617,6 +617,226 @@ def test_capture_state_resume_skips_to_next_failed_rank() -> None:
     assert 90 not in bot._processed_player_ranks
 
 
+def test_capture_state_resume_retries_first_of_multiple_failed_ranks() -> None:
+    from scripts.capture_daily_screenshots import CaptureState, DailyCaptureBot, CaptureConfig
+
+    state = CaptureState.new(
+        run_id="20260710-010000",
+        target_date="07-09",
+        start_rank=1,
+        end_rank=40,
+    )
+    for rank in range(1, 21):
+        state.set_rank_status(rank, "completed")
+    for rank in range(21, 24):
+        state.set_rank_status(rank, "failed")
+    for rank in range(27, 36):
+        state.set_rank_status(rank, "failed")
+
+    config = CaptureConfig(
+        output_dir=ROOT / "screenshots.test",
+        start_rank=1,
+        end_rank=40,
+        resume=True,
+    )
+    bot = DailyCaptureBot(config)
+    bot.capture_state = state
+    bot.run_id = state.run_id
+    bot.preload_from_state()
+
+    assert bot._next_expected_rank == 21
+    assert 20 in bot._processed_player_ranks
+    for failed_rank in list(range(21, 24)) + list(range(27, 36)):
+        assert failed_rank not in bot._processed_player_ranks
+
+
+def test_process_player_unstable_profile_with_entry_ready_continues() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        PartyReviewWaitResult,
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "profile_unstable_continue"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 23
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=15000,
+        polls=2,
+        stable=False,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=True,
+        img=img,
+        elapsed_ms=8000,
+        polls=2,
+        stable=True,
+        on_profile=True,
+    )
+    party_wait = PartyReviewWaitResult(
+        state="private",
+        img=img,
+        elapsed_ms=9000,
+        polls=3,
+        stable=True,
+        stable_hits_used=2,
+    )
+
+    bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot._confirm_unstable_profile_entry = lambda rank: entry_wait  # type: ignore[method-assign]
+    open_party_review_called = {"value": False}
+
+    def open_party_review(rank: int):
+        open_party_review_called["value"] = True
+        return entry_wait, party_wait
+
+    bot.open_party_review = open_party_review  # type: ignore[method-assign]
+    bot.back_to_ranking = lambda: None  # type: ignore[method-assign]
+
+    bot.process_player(23, 1, 700, 1000)
+
+    assert open_party_review_called["value"] is True
+    assert bot.capture_state.get_rank_status(23) == "skipped"
+    assert any(
+        event["event"] == "profile_unstable_but_entry_ready"
+        for event in bot.events
+    )
+    assert not any(event["event"] == "player_error" for event in bot.events)
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_unstable_profile_without_entry_records_profile_entry_timeout() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "profile_entry_timeout"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 27
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=15000,
+        polls=2,
+        stable=False,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=False,
+        img=img,
+        elapsed_ms=8000,
+        polls=3,
+        stable=False,
+        on_profile=True,
+    )
+
+    bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot._confirm_unstable_profile_entry = lambda rank: entry_wait  # type: ignore[method-assign]
+    bot.recover_to_ranking = lambda: None  # type: ignore[method-assign]
+    open_party_review_called = {"value": False}
+
+    def fake_open_party_review(rank: int):
+        open_party_review_called["value"] = True
+        raise AssertionError("should not open party review")
+
+    bot.open_party_review = fake_open_party_review  # type: ignore[method-assign]
+
+    bot.process_player(27, 1, 700, 1000)
+
+    assert open_party_review_called["value"] is False
+    record = bot.capture_state.get_rank_record(27)
+    assert record["status"] == "failed"
+    assert str(record["failure_screenshot"]).endswith("rank_27_profile_entry_timeout.png")
+    assert any(
+        event["event"] == "player_error" and event["reason"] == "profile_entry_timeout"
+        for event in bot.events
+    )
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_unexpected_screen_still_records_failure() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import SCREEN_UNKNOWN, WaitResult
+
+    output_dir = ROOT / "screenshots.test" / "unexpected_screen_failure"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 30
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    profile_wait = WaitResult(
+        screen=SCREEN_UNKNOWN,
+        img=img,
+        elapsed_ms=12000,
+        polls=2,
+        stable=True,
+    )
+
+    bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot.recover_to_ranking = lambda: None  # type: ignore[method-assign]
+    confirm_called = {"value": False}
+
+    def fake_confirm(rank: int):
+        confirm_called["value"] = True
+        raise AssertionError("should not confirm unstable profile")
+
+    bot._confirm_unstable_profile_entry = fake_confirm  # type: ignore[method-assign]
+
+    bot.process_player(30, 1, 700, 1000)
+
+    assert confirm_called["value"] is False
+    record = bot.capture_state.get_rank_record(30)
+    assert record["status"] == "failed"
+    assert str(record["failure_screenshot"]).endswith("rank_30_unexpected_screen.png")
+    assert any(
+        event["event"] == "player_error" and event["reason"] == "unexpected_screen"
+        for event in bot.events
+    )
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
 def test_output_isolation_run_dirs() -> None:
     from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
 
@@ -915,6 +1135,11 @@ if __name__ == "__main__":
     test_build_next_rank_spec_ignores_partial_rank_ocr()
     test_compute_next_target_rank_skips_manual_and_completed()
     test_capture_state_resume_and_preload_match_ids()
+    test_capture_state_resume_skips_to_next_failed_rank()
+    test_capture_state_resume_retries_first_of_multiple_failed_ranks()
+    test_process_player_unstable_profile_with_entry_ready_continues()
+    test_process_player_unstable_profile_without_entry_records_profile_entry_timeout()
+    test_process_player_unexpected_screen_still_records_failure()
     test_output_isolation_run_dirs()
     test_save_failure_screenshot_uses_isolated_failures_dir()
     test_record_rank_failure_writes_state_and_event()
