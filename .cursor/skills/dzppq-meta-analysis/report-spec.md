@@ -36,6 +36,10 @@ Apply filtering before all rankings:
 - Normalize equipment names by removing the `核选` prefix.
 - Store `selected_count` and `selected_rate` separately.
 - Equipment upgrade priority is higher when selected-rate is high and rank impact is positive.
+- Super equipment whitelist: `巫术玩偶`, `小鲨包`, `金咸鱼`, `幸运猫猫`, `碰碰气球`, `炸炸魔术箱`, `发财树`, `核桃火箭`, `鲱鱼罐头`.
+- Food-club equipment: normalized names starting with `美味` / `绝味` / `暗黑`, plus exact names `杏仁豆腐`, `椒盐酥糖`, `岛好锅`.
+- Special equipment rankings sort by mature/high-sample preference then adjusted avg rank / top4; low-sample rows stay visible with `低` confidence. `岛好锅` must carry an explicit low-confidence warning when scarce.
+- Per-hero recommendations expose `recommended_items` (normal), `recommended_super_items`, and `recommended_food_items` without duplicating special items into the normal column.
 
 ### Bonds
 
@@ -47,10 +51,13 @@ Apply filtering before all rankings:
 
 Separate from composition `main_bond` and from activated bond-tier rows in `heroes_and_equipment.bonds`:
 
-- For each filtered player board, look only at activated bonds.
-- Primary bond(s) are the activated bond(s) with the highest activation count (`trait_totals`, including jiujiu bonus).
-- If multiple bonds tie on count, count the same player for each tied bond.
-- Aggregate statistics by bond name only; do not split `学习社3` and `学习社5` into separate rows.
+- Business classification is separate from factual `PlayerFeature.main_bond`.
+- Food-harvest equipment or `美食社收菜` archetype boards are assigned to `美食社`.
+- Otherwise, only factual bonds that reach the configured second threshold qualify.
+- Qualified bonds are ranked by final activation count (`trait_totals`, including jiujiu bonus); ties at the max count are all retained.
+- If no factual bond qualifies and the archetype is `高费拼多多`, classify as `高费拼多多`.
+- Aggregate statistics by bond/category name only; do not split `学习社3` and `学习社5` into separate rows.
+- Keep per-row `source_distribution` and overall `source` / `category` audit fields in Markdown and HTML.
 - Rank bonds by average rank ascending, then top4 rate descending, then sample size.
 - Keep existing bond-tier and jiujiu sections unchanged.
 
@@ -76,6 +83,8 @@ Represent each player board as:
 - `hero_set`: all known heroes.
 - `level`: number of known heroes, capped for reporting as 7/8/9.
 - `main_bond`: active bond with highest tier, breaking ties by count and name.
+- `archetype`: gameplay identity separate from factual bonds (`美食社收菜`, `高费拼多多`, `羁绊运营:X`, `拼多多`).
+- `archetype_signals`: auditable evidence for the archetype label.
 - `carry_names`: top 3 carry-score heroes.
 - `comp_signature`: main bond plus carry names.
 
@@ -87,6 +96,8 @@ Cluster boards into comp families:
 - Do not force every board into a meta comp; leave noisy boards as mixed.
 - Name comp families from family-level trait distribution, not a single-board vote.
 - If activated traits are mostly first-threshold traits and no stable carry trait leads, label the comp as `拼多多 / carry1+carry2`.
+- Any final board with normalized food-harvest equipment (`美味` / `绝味` / `暗黑` prefixes, including `核选`) is a strong `美食社收菜` signal; clustering and strategy naming should preserve that archetype even when factual bonds differ.
+- High-cost boards with enough 4/5-cost units, no low-cost 3-star unit, a 2-star+ 4/5-cost main carry, and no stable deep trait investment should be labeled `高费拼多多`; they remain in the `高费` recommendation pool.
 - Force the label bond into `common_bonds` when a bond label is used.
 - Split large families into high-tier bond subfamilies when sample size is sufficient, e.g. `考古社-7`.
 - Merge duplicate comp rows into strategy-level models when they share core carries and compatible main/sub bond traits. Keep lower-tier forms as `transition_stages` under the mature strategy.
@@ -104,17 +115,56 @@ For each comp family, report:
 - Average rank, top4 rate, win rate, sample size, confidence.
 - Average number of 3-star lineup units overall and in top4 samples.
 - Mature stage and transition stages. Transition stages contribute to formation difficulty and trap analysis but should not become separate top-level recommendations when they are the same strategy.
+- Strategy rows should expose `mature_stats`, `transition_stats`, `aggregate_stats`, `cluster_reason`, `merge_reason`, `confidence_evidence`, `score_breakdown`, `stage_inversion_diagnostics`, and `trend` when available.
+- Markdown/HTML comp panels must show low-confidence notes when formal confidence criteria fail, plus mature/transition inversion diagnostics when present.
+
+### High-Cost Three-Star Risk
+
+- Do not emit separate `高费大成上限` / `高费大成上限观察` recommendation keys or report sections.
+- When a 4/5-cost carry shows high 3-star dependency, cap the normal recommended star requirement at 2 stars and show an explicit cost-risk note on that high-cost comp.
+- Keep the underlying `high_cost_three_star_dependency` flag on composition rows for audit and scoring penalties.
+
+### Recommendation Thresholds
+
+- Discovery threshold: `min_comp_apps=5` keeps a comp family visible and eligible for the recommendation list.
+- Formal confidence criteria remain auditable on each strategy:
+  - raw `appearances >= 10`
+  - weighted appearances `>= 5`
+  - effective sample `n_eff >= 8`
+  - batch coverage `>= 2`
+  - cluster archetype purity `>= 0.70`
+  - observed wins `>= 1`
+  - shrunk top4 lower bound within play-style baseline gap
+  - no high-cost three-star dependency for normal star advice
+- Failing the formal confidence criteria must not remove the strategy from `赌狗` / `高费` recommendations. Render a low-confidence note instead.
+- There is no per-style count limit; output every discovered strategy under its play style.
+- Recommendation ranking uses shrunk performance, formation difficulty, uncertainty, and version trend; popularity is descriptive only.
+
+### Version Trend Windows
+
+- Default trend mode compares the latest 2 batches vs the prior 2 batches using `screenshots.MMDD` batch order with cross-year handling.
+- If a supported balance boundary is provided, compare post-boundary vs pre-boundary windows instead of only rolling windows.
+- Output `上升`, `稳定`, `下滑`, or insufficient-sample status; do not label random noise as a version shift.
+- Trend fields belong on strategy rows and should be rendered in Markdown/HTML comp panels.
+
+### Classification Overview
+
+| Dimension | Values | Use |
+|-----------|--------|-----|
+| play_style | `赌狗` / `高费` | Recommendation sections, JSON keys, dashboard filters |
+| archetype | `美食社收菜` / `高费拼多多` / `羁绊运营:X` / `拼多多` | Naming and detail evidence only |
+| low-cost 3-star signal | any lineup 1/2/3-cost unit at 3 stars | Forces `赌狗`; blocks `高费拼多多` |
 
 ### Play Style Split
 
 Every player board and merged strategy should be classified as either `赌狗` or `高费`.
 
+- Any lineup 1/2/3-cost 3-star unit: always `赌狗`.
 - `level <= 6`: always `赌狗`.
-- `level >= 8` with no 1/2/3-cost 3-star unit: `高费`.
-- `level == 7`: low-cost main carry means `赌狗`; otherwise `高费`.
-- Remaining edge cases: low-cost 3-star main carry means `赌狗`; otherwise `高费`.
+- `level == 7` with a low-cost main carry: `赌狗`.
+- Otherwise, boards without low-cost 3-stars are `高费`.
 
-Keep a `play_style_breakdown` on strategy rows because merged strategies can contain mixed stage samples. Recommendation sections should be split by final strategy `play_style`, while global difficulty, popularity, trap, hero, equipment, and card analysis can still use all strategies.
+Keep a `play_style_breakdown` on strategy rows because merged strategies can contain mixed stage samples. Recommendation sections should be split by final strategy `play_style`, which follows the mature stage rather than aggregate majority across transition boards. If mature-stage carry advice requires a low-cost 3-star, force `赌狗`. Global difficulty, popularity, trap, hero, equipment, and card analysis can still use all strategies.
 
 ## Formation Difficulty And Popularity
 
@@ -153,6 +203,7 @@ Primary card ranking:
 - first-card rankings use `cards[0]`.
 - group single-card and first-card rankings by card template prefix type (`彩` / `黄` / `蓝` / `白` / `其他`) and rank within each group; do not compare different prefix types on one leaderboard.
 - unprefixed disambiguated labels such as `吸吸宝pro` and `快速成型` should inherit their source prefix type for grouping; `蓝·重质也重量pro` and `蓝·拍档支援` keep their template prefix directly.
+- `蓝·一起刷刷刷` and `蓝·天降啾啾pro` share one icon template but must be resolved separately: count final-board equipment names ending in `啾啾`; `>= 2` resolves to `蓝·天降啾啾pro`, otherwise `蓝·一起刷刷刷`. Legacy merged labels are input aliases only; rankings and reports must not call them one merged statistic.
 - blue cards are duo-oriented and should additionally include a recomputed team-rank view with team average rank and team top2 rate.
 
 Secondary card views:
@@ -178,7 +229,14 @@ For each hero:
 - Sort main equipment recommendations by sample size first, then adjusted rank/top4. Low-sample high-roll items belong in an observation note.
 - common 3-item sets when enough complete samples exist.
 
-Export the full per-hero equipment tables to `data/latest_meta_analysis_equipment.xlsx`. The Markdown report should only keep a short high-investment carry overview and link to the Excel file.
+Export the full per-hero equipment tables to `data/latest_meta_analysis_equipment.xlsx`. The Markdown report should only keep a short high-investment carry overview and link to the Excel file, the dashboard equipment panel, and standalone hero pages under `data/hero-equipment/`.
+
+Also publish:
+- Super equipment strength ranking with recommended wearer heroes.
+- Food-club equipment strength ranking with recommended wearer heroes.
+- Markdown anchors back to `#super-equipment` and `#food-equipment`.
+- Per-hero `detail_items`: every single equipment with raw `appearances > 10` across normal/super/food kinds, including weighted appearances, `n_eff`, weighted avg rank / top4 / top2 / win rate, adjusted avg rank, and selected rate. Summary recommendation columns remain truncated and use their own reliability thresholds.
+- Standalone hero pages: Unicode filenames such as `data/hero-equipment/厨师长.html`, linked from the dashboard with URL-encoded hrefs and `target="_blank" rel="noopener noreferrer"`.
 
 ## Jiujiu Analysis
 
@@ -243,19 +301,28 @@ Use this Markdown shape:
 Also write `data/环境分析详情.html`:
 
 - one tabbed dashboard with clickable top-level panels.
-- default panel order: composition recommendations, primary bond strength, equipment, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
-- support hash navigation such as `#equipment`, `#compositions`, and `#primary-bond`.
+- default panel order: composition recommendations, primary bond strength, equipment, super equipment, food equipment, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
+- support hash navigation such as `#equipment`, `#super-equipment`, `#food-equipment`, `#compositions`, and `#primary-bond`.
 - sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
-- equipment panel keeps cost/trait/search filters and sortable columns.
-- composition panel keeps paginated comp detail pages with 7/8/9 board cards and `赌狗/高费` filters.
+- equipment panel keeps cost/trait/search filters and sortable columns, plus separate super/food recommendation columns; default `全部` filters stay neutral, and only concrete selections use the golden active style via CSS `:not([data-*="all"])`.
+- equipment hero names open standalone pages under `data/hero-equipment/` in a new browser tab; do not embed all per-hero detail sections into the dashboard.
+- super/food equipment panels show strength rank, sample metrics, confidence, recommended wearers, and low-sample notes.
+- composition panel keeps paginated comp detail pages with 7/8/9 board cards and only `赌狗/高费` style filters.
+- do not render zone filters, archetype filters, observation queues, or high-cost ceiling recommendation pages in the dashboard.
+- comp detail cards should show archetype, archetype evidence, mature/transition stats, inversion diagnostics, low-confidence notes, trend, raw/weighted/`n_eff`, confidence evidence, score breakdown, and cluster/merge reasons when present.
+- primary-bond panel should show business classification rules plus `source` / `category` audit fields.
 - trap panel keeps trap comp cards with 7/8/9 observed boards.
-- do not write separate poster HTML or standalone per-table HTML files.
+- do not write separate poster HTML or standalone per-table HTML files, except the intentional per-hero equipment pages under `data/hero-equipment/`.
 
 ## Excel Equipment Output
 
 Also write `data/latest_meta_analysis_equipment.xlsx`:
 
-- sheet `全英雄出装`: per-hero recommended items with rank order and selected-equipment priority.
+- sheet `全英雄出装`: per-hero recommended normal items with rank order and selected-equipment priority.
+- sheet `英雄超级装备推荐`: per-hero super equipment recommendations.
+- sheet `英雄美食社装备推荐`: per-hero food-club equipment recommendations.
+- sheet `超级装备排行`: super equipment strength ranking and recommended wearers.
+- sheet `美食社装备排行`: food-club equipment strength ranking and recommended wearers.
 - sheet `阵容主C关键装备`: comp-scoped carry equipment notes.
 - sheet `常见三件套`: common 3-item sets.
 - sheet `低样本观察`: low-sample equipment observations.

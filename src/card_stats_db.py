@@ -189,19 +189,31 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
     player_rows = conn.execute("SELECT * FROM players ORDER BY match_id, rank").fetchall()
     kept_player_ids = {int(row["id"]) for row in player_rows if int(row["id"]) not in bot_ids}
 
-    heroes_by_player: dict[int, list[dict[str, int]]] = defaultdict(list)
+    heroes_by_player: dict[int, list[dict[str, Any]]] = defaultdict(list)
     if kept_player_ids:
         hero_rows = conn.execute(
             """
-            SELECT player_id, stars
-            FROM heroes
-            WHERE player_id IN ({})
-            ORDER BY player_id, slot_index
+            SELECT h.id, h.player_id, h.stars, he.equipment_name
+            FROM heroes h
+            LEFT JOIN hero_equipments he ON he.hero_id = h.id
+            WHERE h.player_id IN ({})
+            ORDER BY h.player_id, h.slot_index, he.item_index
             """.format(",".join("?" for _ in kept_player_ids)),
             tuple(kept_player_ids),
         ).fetchall()
+        heroes_by_id: dict[int, dict[str, Any]] = {}
         for row in hero_rows:
-            heroes_by_player[int(row["player_id"])].append({"stars": int(row["stars"] or 0)})
+            hero_id = int(row["id"])
+            if hero_id not in heroes_by_id:
+                hero = {
+                    "stars": int(row["stars"] or 0),
+                    "equipments": [],
+                }
+                heroes_by_id[hero_id] = hero
+                heroes_by_player[int(row["player_id"])].append(hero)
+            equipment_name = row["equipment_name"]
+            if equipment_name and equipment_name != "unknown":
+                heroes_by_id[hero_id]["equipments"].append(str(equipment_name))
 
     cards_by_player: dict[int, list[str]] = defaultdict(list)
     if kept_player_ids:

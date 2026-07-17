@@ -78,10 +78,29 @@ def normalize_match_db(db_path: Path) -> Counter:
     ).fetchall()
     for row in rows:
         hero_rows = conn.execute(
-            "SELECT stars FROM heroes WHERE player_id = ?",
+            """
+            SELECT h.id, h.stars, he.equipment_name
+            FROM heroes h
+            LEFT JOIN hero_equipments he ON he.hero_id = h.id
+            WHERE h.player_id = ?
+            ORDER BY h.slot_index, he.item_index
+            """,
             (int(row["player_id"]),),
         ).fetchall()
-        heroes = [{"stars": int(hero_row["stars"] or 0)} for hero_row in hero_rows]
+        heroes_by_id: dict[int, dict] = {}
+        heroes: list[dict] = []
+        for hero_row in hero_rows:
+            hero_id = int(hero_row["id"])
+            if hero_id not in heroes_by_id:
+                hero = {
+                    "stars": int(hero_row["stars"] or 0),
+                    "equipments": [],
+                }
+                heroes_by_id[hero_id] = hero
+                heroes.append(hero)
+            equipment_name = hero_row["equipment_name"]
+            if equipment_name and equipment_name != "unknown":
+                heroes_by_id[hero_id]["equipments"].append(str(equipment_name))
         old_name = str(row["card_name"])
         new_name = resolve_card_label(old_name, int(row["slot_index"]), heroes)
         if new_name != old_name:

@@ -16,6 +16,9 @@ FAST_XXB_LABEL = "黄·快速成型"
 MANA_FOCUS_LABEL = "白·法力专注"
 KZDH_LABEL = "蓝·开攒大亨"
 SSS_LABEL = "蓝·一起刷刷刷+天降啾啾pro"
+SSS_NORMAL_LABEL = "蓝·一起刷刷刷"
+SSS_PRO_LABEL = "蓝·天降啾啾pro"
+SSS_GROUP = frozenset({"一起刷刷刷", "天降啾啾pro", "一起刷刷刷+天降啾啾pro"})
 BOYL_LABEL = "蓝·波纹利己"
 FDYQ_LABEL = "蓝·福袋有钱"
 YELLOW_GONGMING_LABEL = "黄·装备共鸣"
@@ -28,8 +31,8 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "拍档支援": QUALITY_PARTNER_SUPPORT_LABEL,
     "最佳拍档": "拍档支援",
     "最强支援": "拍档支援",
-    "一起刷刷刷": "一起刷刷刷+天降啾啾pro",
-    "天降啾啾pro": "一起刷刷刷+天降啾啾pro",
+    "一起刷刷刷": SSS_NORMAL_LABEL,
+    "天降啾啾pro": SSS_PRO_LABEL,
     "开攒": "开攒大亨",
     "大亨": "开攒大亨",
     "福袋": "福袋有钱",
@@ -53,8 +56,8 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "蓝·最强支援": QUALITY_PARTNER_SUPPORT_LABEL,
     "蓝·开攒": KZDH_LABEL,
     "蓝·大亨": KZDH_LABEL,
-    "蓝·一起刷刷刷": SSS_LABEL,
-    "蓝·天降啾啾pro": SSS_LABEL,
+    "蓝·一起刷刷刷": SSS_NORMAL_LABEL,
+    "蓝·天降啾啾pro": SSS_PRO_LABEL,
     "蓝·福袋": FDYQ_LABEL,
     "蓝·有钱同享": FDYQ_LABEL,
     "蓝·利己主义": BOYL_LABEL,
@@ -108,11 +111,12 @@ def normalize_card_label(label: str) -> str:
 def resolve_card_label(
     label: str,
     slot_index: int,
-    heroes: list[dict],
+    heroes: list[dict] | None = None,
 ) -> str:
     """Apply static aliases and player-context card disambiguation."""
     label = normalize_card_label(label)
     prefix, body = split_card_prefix(label)
+    heroes = heroes or []
     three_star_count = sum(
         1 for hero in heroes if int(hero.get("stars", 0)) >= 3
     )
@@ -124,6 +128,16 @@ def resolve_card_label(
         return FAST_XXB_PRO_LABEL
     if body in FAST_XXB_GROUP:
         return FAST_XXB_LABEL
+    if body in SSS_GROUP:
+        jiujiu_count = sum(
+            1
+            for hero in heroes
+            for equipment in hero.get("equipments", []) or []
+            if str(equipment).removeprefix("核选").endswith("啾啾")
+        )
+        if jiujiu_count >= 2:
+            return SSS_PRO_LABEL
+        return SSS_NORMAL_LABEL
     return label
 
 

@@ -21,6 +21,7 @@ from src.detect_cards import (  # noqa: E402
     normalize_template_label,
     select_card_match,
 )
+from src.card_rules import resolve_card_label  # noqa: E402
 from src.layout import NUM_CARDS, NUM_PLAYERS  # noqa: E402
 
 THRESHOLD = float(DETECTION_PARAMS["threshold"])
@@ -184,6 +185,52 @@ class SelectCardMatchTests(unittest.TestCase):
         self.assertEqual(decision.label, "蓝·攻防联合")
         self.assertEqual(decision.debug["match_path"], "known_family_low_gap_accept")
 
+    def test_egg_transform_color_rescue(self) -> None:
+        details = [
+            _detail("白·蛋仔变变变.jpg", combined=0.82, shape=0.90, color=0.74),
+            _detail("彩·装备变变变.jpg", combined=0.78, shape=0.79, color=0.986),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "彩·装备变变变")
+        self.assertEqual(decision.debug["match_path"], "shape_family_color_rescue")
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+
+    def test_egg_transform_keeps_white_when_color_clear(self) -> None:
+        details = [
+            _detail("白·蛋仔变变变.jpg", combined=0.88, shape=0.91, color=0.97),
+            _detail("彩·装备变变变.jpg", combined=0.79, shape=0.78, color=0.80),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "白·蛋仔变变变")
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+        self.assertIn(
+            decision.debug["match_path"],
+            {"shape_family_color_rescue", "shape_cluster_color", "combined"},
+        )
+
+    def test_fighter_color_rescue(self) -> None:
+        details = [
+            _detail("蓝·打手.jpg", combined=0.81, shape=0.89, color=0.73),
+            _detail("白·打手.jpg", combined=0.77, shape=0.79, color=0.982),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "白·打手")
+        self.assertEqual(decision.debug["match_path"], "shape_family_color_rescue")
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+
+    def test_fighter_keeps_blue_when_color_clear(self) -> None:
+        details = [
+            _detail("蓝·打手.jpg", combined=0.87, shape=0.90, color=0.96),
+            _detail("白·打手.jpg", combined=0.78, shape=0.78, color=0.79),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "蓝·打手")
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+        self.assertIn(
+            decision.debug["match_path"],
+            {"shape_family_color_rescue", "shape_cluster_color", "combined"},
+        )
+
     def test_unrelated_card_stays_on_combined_path(self) -> None:
         details = [
             _detail("白·法力专注.jpg", combined=0.90, shape=0.88, color=0.90),
@@ -211,6 +258,50 @@ class SelectCardMatchTests(unittest.TestCase):
         decision = self._select(details)
         self.assertIsNone(decision.label)
         self.assertEqual(decision.debug["reject_reason"], "below_threshold")
+
+
+class CardContextRuleTests(unittest.TestCase):
+    def test_sss_defaults_to_normal_without_equipment_context(self) -> None:
+        for label in (
+            "一起刷刷刷",
+            "蓝·天降啾啾pro",
+            "蓝·一起刷刷刷+天降啾啾pro",
+        ):
+            self.assertEqual(
+                resolve_card_label(label, 0, []),
+                "蓝·一起刷刷刷",
+            )
+        self.assertEqual(
+            resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, None),
+            "蓝·一起刷刷刷",
+        )
+        self.assertEqual(
+            resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0),
+            "蓝·一起刷刷刷",
+        )
+
+    def test_sss_uses_equipment_instance_count(self) -> None:
+        cases = [
+            ([], "蓝·一起刷刷刷"),
+            ([{"equipments": ["火焰啾啾"]}], "蓝·一起刷刷刷"),
+            (
+                [{"equipments": ["火焰啾啾", "寒冰啾啾"]}],
+                "蓝·天降啾啾pro",
+            ),
+            (
+                [
+                    {"equipments": ["核选火焰啾啾"]},
+                    {"equipments": ["寒冰啾啾", "普通装备"]},
+                ],
+                "蓝·天降啾啾pro",
+            ),
+        ]
+        for heroes, expected in cases:
+            with self.subTest(heroes=heroes):
+                self.assertEqual(
+                    resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, heroes),
+                    expected,
+                )
 
 
 class DetectCardsRoiTests(unittest.TestCase):

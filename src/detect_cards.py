@@ -80,6 +80,14 @@ VISUAL_CARD_GROUPS: tuple[dict[str, Any], ...] = (
         "strategies": ("known_family_low_gap_accept",),
         "low_gap_variant": "narrow",
     },
+    {
+        "labels": frozenset({"白·蛋仔变变变", "彩·装备变变变"}),
+        "strategies": ("shape_family_color_rescue",),
+    },
+    {
+        "labels": frozenset({"白·打手", "蓝·打手"}),
+        "strategies": ("shape_family_color_rescue",),
+    },
 )
 
 _LABEL_TO_GROUP: dict[str, dict[str, Any]] = {}

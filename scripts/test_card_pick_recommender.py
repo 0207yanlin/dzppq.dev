@@ -106,7 +106,8 @@ def _merged_card_stats() -> CardStatsIndex:
     base_keys = {
         "蓝": [
             "蓝·拍档支援",
-            "蓝·一起刷刷刷+天降啾啾pro",
+            "蓝·一起刷刷刷",
+            "蓝·天降啾啾pro",
             "蓝·开攒大亨",
             "蓝·福袋有钱",
             "蓝·波纹利己",
@@ -172,18 +173,44 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
                         "rank": 1,
                         "row_index": 0,
                         "partner_player": 2,
-                        "heroes": [{"slot_index": 0, "hero_name": "测试英雄", "stars": 3}],
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 3,
+                                "equipment_count": "2",
+                                "equipments": ["核选火焰啾啾", "寒冰啾啾"],
+                            }
+                        ],
                         "cards": [
                             {"slot_index": 0, "card_name": "白·克隆技术"},
                             {"slot_index": 1, "card_name": "蓝·福袋有钱"},
+                            {
+                                "slot_index": 2,
+                                "card_name": "蓝·一起刷刷刷+天降啾啾pro",
+                            },
                         ],
                     },
                     {
                         "rank": 2,
                         "row_index": 1,
                         "partner_player": 1,
-                        "heroes": [{"slot_index": 0, "hero_name": "测试英雄", "stars": 2}],
-                        "cards": [{"slot_index": 0, "card_name": "蓝·克隆技术"}],
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 2,
+                                "equipment_count": "1",
+                                "equipments": ["火焰啾啾"],
+                            }
+                        ],
+                        "cards": [
+                            {"slot_index": 0, "card_name": "蓝·克隆技术"},
+                            {
+                                "slot_index": 1,
+                                "card_name": "蓝·一起刷刷刷+天降啾啾pro",
+                            },
+                        ],
                     },
                     {
                         "rank": 3,
@@ -249,10 +276,10 @@ MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
     ("蓝", "蓝·最佳拍档", "蓝·拍档支援"),
     ("蓝", "最强支援", "蓝·拍档支援"),
     ("蓝", "蓝·最强支援", "蓝·拍档支援"),
-    ("蓝", "一起刷刷刷", "蓝·一起刷刷刷+天降啾啾pro"),
-    ("蓝", "蓝·一起刷刷刷", "蓝·一起刷刷刷+天降啾啾pro"),
-    ("蓝", "天降啾啾pro", "蓝·一起刷刷刷+天降啾啾pro"),
-    ("蓝", "蓝·天降啾啾pro", "蓝·一起刷刷刷+天降啾啾pro"),
+    ("蓝", "一起刷刷刷", "蓝·一起刷刷刷"),
+    ("蓝", "蓝·一起刷刷刷", "蓝·一起刷刷刷"),
+    ("蓝", "天降啾啾pro", "蓝·天降啾啾pro"),
+    ("蓝", "蓝·天降啾啾pro", "蓝·天降啾啾pro"),
     ("蓝", "开攒", "蓝·开攒大亨"),
     ("蓝", "蓝·开攒", "蓝·开攒大亨"),
     ("蓝", "大亨", "蓝·开攒大亨"),
@@ -441,7 +468,7 @@ def test_compact_line_marks_low_confidence() -> None:
             slot=0,
             raw_text="一起刷刷刷一",
             cleaned_text="一起刷刷刷",
-            matched_key="蓝·一起刷刷刷+天降啾啾pro",
+            matched_key="蓝·一起刷刷刷",
             match_score=0.62,
             metrics=stats.get_metrics("蓝·福袋有钱", "蓝"),
         ),
@@ -544,6 +571,14 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     assert blue_bag is not None
     assert blue_clone.team_avg_rank is not None
     assert blue_clone.team_top2_rate is not None
+
+    normal_sss = stats.get_metrics("蓝·一起刷刷刷", "蓝")
+    pro_sss = stats.get_metrics("蓝·天降啾啾pro", "蓝")
+    assert normal_sss is not None
+    assert pro_sss is not None
+    assert normal_sss.appearances == 1
+    assert pro_sss.appearances == 1
+    assert stats.get_metrics("蓝·一起刷刷刷+天降啾啾pro", "蓝") is None
 
 
 def test_load_card_stats_prefers_db(tmp_path: Path) -> None:

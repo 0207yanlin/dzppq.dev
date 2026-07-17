@@ -290,6 +290,41 @@ python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-
 
 ---
 
+## 2c. 环境分析报告 — `dzppq-meta-analysis`
+
+基于最新对局库生成环境分析报告。生产脚本：
+
+```powershell
+python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
+```
+
+可选参数：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--db` | `data/match_latest.db`（缺失时回退最新 `data/matches_*.db`） | 对局 SQLite |
+| `--balance-notes` | 无 | 平衡性调整笔记文件 |
+| `--min-comp-apps` | `5` | 阵容发现门槛 |
+
+默认产物：
+
+- `data/latest_meta_analysis.json`
+- `data/latest_meta_analysis_report.md`
+- `data/latest_meta_analysis_equipment.xlsx`
+- `data/环境分析详情.html`（多标签交互页）
+- `data/hero-equipment/*.html`（棋子独立装备详情页；从装备面板点击棋子会新开标签页）
+
+阵容推荐只分 **赌狗** / **高费** 两类，输出所有达到发现门槛的策略，不设每类数量上限，也不再拆观察区或高费上限分区。交互页阵容面板仅保留类型筛选。
+
+硬边界：
+- 场上任意 1/2/3 费三星棋子 → **赌狗**；成熟阶段若仍建议低费三星主/副 C，也归入赌狗。
+- **高费拼多多** 必须无低费三星，并以二星四/五费主 C 为常规成型核心（高费三星仅作成本风险提示）。
+- 策略推荐分桶跟随成熟阶段玩法类型，过渡样本比例只保留在审计字段中。
+
+详细规则见 `.cursor/skills/dzppq-meta-analysis/`。
+
+---
+
 ## 3. 构建对局数据库 — `build_match_database.py`
 
 ### 从已有 GT 导入（默认批次）
