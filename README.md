@@ -386,3 +386,20 @@ python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-
 - `heroes`：玩家阵容、星级、装备数和英雄匹配分
 - `hero_equipments`：英雄携带装备明细
 - `cards`：玩家卡牌及匹配分
+
+### 按卡牌找原始对局截图 — `find_card_matches.py`
+
+按规范卡牌名（支持别名规范化）在统一对局库中检索，输出含该卡的原始截图路径。同一局多名玩家持有该卡时只输出一次；结果按 `captured_at` **升序**（最早在前，最新在末尾），便于从旧到新浏览。
+
+```powershell
+python scripts/find_card_matches.py 蓝·满血才是王道
+python scripts/find_card_matches.py 蓝·福袋 --db data/match_latest.db --limit 20
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `card_name` | （必填） | 卡牌名；会先走 `normalize_card_label`，再精确匹配 `cards.card_name` |
+| `--db` | `data/match_latest.db` | 对局 SQLite（只读） |
+| `--limit` | 不限制 | 最多输出多少局（仍按时间升序取前 N 条） |
+
+每条结果先打印采集时间、命中玩家名次/卡槽和相对路径，下一行单独打印解析后的 **绝对 PNG 路径**。在 Windows 终端里可对绝对路径 **Ctrl+Click** 直接打开原始截图。数据库不存在、无匹配、截图文件缺失或 `--limit` 非法时会提示并返回非零退出码；不修改数据库或截图。
