@@ -11,7 +11,13 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.card_rules import CARD_LABEL_ALIASES, normalize_card_label
+from src.card_rules import (
+    CARD_LABEL_ALIASES,
+    YELLOW_JSB_XJ_GROUP,
+    YELLOW_JSB_XJ_MERGED_LABEL,
+    normalize_card_label,
+    split_card_prefix,
+)
 from src.layout import (
     CARD_TEMPLATE_DIR,
     NUM_CARDS,
@@ -99,7 +105,11 @@ for _group in VISUAL_CARD_GROUPS:
 def normalize_template_label(name: str) -> str:
     """Normalize a template filename / label for matching output."""
     stem = name.replace(".jpg", "").replace(".jpeg", "").replace(".png", "")
-    return normalize_card_label(CARD_LABEL_ALIASES.get(stem, stem))
+    label = normalize_card_label(CARD_LABEL_ALIASES.get(stem, stem))
+    _, body = split_card_prefix(label)
+    if body in YELLOW_JSB_XJ_GROUP:
+        return YELLOW_JSB_XJ_MERGED_LABEL
+    return label
 
 
 def crop_center(img: np.ndarray, margin_ratio: float = 0.12) -> np.ndarray:
@@ -551,8 +561,22 @@ def select_card_match(
             if low_gap is not None:
                 return low_gap
 
-    winner = ranked[0]
-    second = ranked[1] if len(ranked) > 1 else None
+    # Collapse templates that normalize to the same canonical label (identical
+    # icons such as 黄·巨神兵 / 黄·迅迅迅捷双剑) so a zero gap does not reject.
+    best_by_label: dict[str, dict] = {}
+    for item in ranked:
+        label = _detail_label(item)
+        current = best_by_label.get(label)
+        if current is None or item["combined"] > current["combined"]:
+            best_by_label[label] = item
+    collapsed = sorted(
+        best_by_label.values(),
+        key=lambda item: item["combined"],
+        reverse=True,
+    )
+
+    winner = collapsed[0]
+    second = collapsed[1] if len(collapsed) > 1 else None
     top1_score = float(winner["combined"])
     top2_score = float(second["combined"]) if second is not None else 0.0
     gap = top1_score - top2_score

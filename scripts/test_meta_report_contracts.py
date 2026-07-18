@@ -1160,6 +1160,33 @@ class MetaReportContractTests(unittest.TestCase):
 
 
 
+    def test_yellow_card_note_describes_jsb_xj_equipment_rules(self) -> None:
+
+        note = MODULE.CARD_MERGE_NOTES["黄"]
+
+        self.assertIn("巨神兵", note)
+
+        self.assertIn("迅迅迅捷双剑", note)
+
+        self.assertIn("数量占优", note)
+
+        self.assertIn("固定种子", note)
+
+        self.assertIn("分别统计", note)
+
+        self.assertEqual(
+            MODULE.MERGED_TEMPLATE_EXPANSIONS["黄·巨神兵+迅迅迅捷双剑"],
+            ["黄·巨神兵", "黄·迅迅迅捷双剑"],
+        )
+
+        md = MODULE.render_md(sample_data())
+
+        self.assertIn("巨神兵之斧", md)
+
+        self.assertIn("固定种子可复现分配", md)
+
+
+
     def test_composition_recommendations_keys_remain_compatible(self) -> None:
 
         eligible = sample_comp()

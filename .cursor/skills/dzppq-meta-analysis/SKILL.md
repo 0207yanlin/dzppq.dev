@@ -56,6 +56,7 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Do not emit separate `高费大成上限` / `高费大成上限观察` recommendation keys or report sections. High-cost 3-star dependency still caps normal star advice at 2 stars and shows a cost-risk note on the affected high-cost comps.
 - Version trend labels (`上升` / `稳定` / `下滑`) compare recent vs prior batch windows; insufficient samples must not force a trend call.
 - Blue cards `蓝·一起刷刷刷` and `蓝·天降啾啾pro` share an icon but are disambiguated by final-board jiujiu equipment count (`>= 2` -> pro); never report them as one merged card statistic.
+- Yellow cards `黄·巨神兵` and `黄·迅迅迅捷双剑` share an icon but are disambiguated by final-board equipment counts of `巨神兵之斧` / `迅捷双剑` (axe-only -> 巨神兵, sword-only -> 迅迅迅捷双剑, both present -> majority); equal counts (including both zero) are assigned from the clear-sample ratio of the current database with a fixed seed. Never report them as one merged card statistic.
 - Do not recommend 3-star 4-cost or 5-cost carries as a normal requirement.
 - Primary bond strength uses business classification: food harvest -> `美食社`, factual bonds must reach the configured second threshold, ties by activation count are retained, and `高费拼多多` is the fallback when no factual bond qualifies.
 - Merge duplicate comp rows into strategy-level recommendations with mature stages and transition stages.

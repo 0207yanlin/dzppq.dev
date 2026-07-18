@@ -101,7 +101,7 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - Strength ranking: `overall_strength_score()` and `merge_comp_strategies()`.
 - Cross-strategy contest and low-cost 3-star difficulty: `enrich_three_star_contest()`.
 - Excel export: `render_xlsx()` and `write_outputs()`.
-- Card logic: `analyze_cards()` with prefix-type grouping via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`. `蓝·一起刷刷刷` / `蓝·天降啾啾pro` are disambiguated by final-board jiujiu count, not merged in rankings.
+- Card logic: `analyze_cards()` with prefix-type grouping via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`. `蓝·一起刷刷刷` / `蓝·天降啾啾pro` are disambiguated by final-board jiujiu count, not merged in rankings. `黄·巨神兵` / `黄·迅迅迅捷双剑` are disambiguated via `resolve_jsb_xj_card_labels()` (axe/sword equipment majority, then seeded clear-sample ratio for ties).
 - Jiujiu logic: `analyze_jiujiu()`.
 - Super / food equipment ranking: `analyze_special_equipment()`, `is_super_equipment()`, `is_food_equipment()`, `equipment_kind()`.
 - Duo composition synergy: `analyze_duo_composition_synergy()`.

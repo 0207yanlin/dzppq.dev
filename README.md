@@ -225,6 +225,26 @@ python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 lab
 
 `label --all` 默认跳过已验证截图；`label --all --force` 才会重新标注已验证截图。
 
+### 卡牌同图标歧义
+
+识别分两层，职责不同：
+
+| 层 | 位置 | 作用 |
+|----|------|------|
+| 图像级 | `src/detect_cards.py` 的 `VISUAL_CARD_GROUPS` | 近图标靠形状/颜色救援；完全相同图标会先规范为同一待判定标签 |
+| 装备上下文 | `src/card_rules.py` 的 `resolve_card_label` / `resolve_jsb_xj_card_labels` | 用最终阵容装备（或其它上下文）消解到规范卡名 |
+
+**黄卡 `巨神兵` / `迅迅迅捷双剑`：** 图标完全一致。模板匹配先输出合并标签 `黄·巨神兵+迅迅迅捷双剑`；统计加载时再按最终阵容装备消歧：
+
+1. 仅有 `巨神兵之斧`（含 `核选` 前缀）→ `黄·巨神兵`
+2. 仅有 `迅捷双剑` → `黄·迅迅迅捷双剑`
+3. 两者都有 → 数量占优
+4. 数量相同（含都为 0）→ 按本次完整对局库中规则 1–3 明确样本比例，以固定种子可复现分配；无明确样本时回退 1:1
+
+同类先例：蓝卡 `一起刷刷刷` / `天降啾啾pro` 按啾啾装备数拆分。
+
+规则或模板变更后，需对相关批次重新 `predict --write`，必要时跑 `normalize_card_ground_truth.py`，再重建 SQLite；环境分析与桌面推荐器在读库时统一走上述消歧，**不会**把随机分配结果回写 GT。
+
 ---
 
 ## 2. 模板候选 — `suggest_template_candidates.py`

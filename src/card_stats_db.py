@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.card_rules import resolve_card_label, split_card_prefix
+from src.card_rules import resolve_jsb_xj_card_labels, split_card_prefix
 from src.match_db import ensure_match_schema, parse_match_batch
 from src.runtime_paths import project_root
 
@@ -226,17 +226,27 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
             """.format(",".join("?" for _ in kept_player_ids)),
             tuple(kept_player_ids),
         ).fetchall()
+        resolve_items: list[dict[str, Any]] = []
+        resolve_player_ids: list[int] = []
         for row in card_rows:
             card_name = str(row["card_name"])
             if card_name == "unknown":
                 continue
             player_id = int(row["player_id"])
             slot_index = int(row["slot_index"])
-            resolved_name = resolve_card_label(
-                card_name,
-                slot_index,
-                heroes_by_player.get(player_id, []),
+            resolve_items.append(
+                {
+                    "label": card_name,
+                    "slot_index": slot_index,
+                    "heroes": heroes_by_player.get(player_id, []),
+                }
             )
+            resolve_player_ids.append(player_id)
+        for player_id, resolved_name in zip(
+            resolve_player_ids,
+            resolve_jsb_xj_card_labels(resolve_items),
+            strict=True,
+        ):
             cards_by_player[player_id].append(resolved_name)
 
     records: list[PlayerCardRecord] = []

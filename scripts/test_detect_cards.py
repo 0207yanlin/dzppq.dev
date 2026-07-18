@@ -21,7 +21,15 @@ from src.detect_cards import (  # noqa: E402
     normalize_template_label,
     select_card_match,
 )
-from src.card_rules import resolve_card_label  # noqa: E402
+from src.card_rules import (  # noqa: E402
+    JSB_XJ_RATIO_SEED,
+    YELLOW_JSB_LABEL,
+    YELLOW_JSB_XJ_MERGED_LABEL,
+    YELLOW_XJ_LABEL,
+    normalize_card_label,
+    resolve_card_label,
+    resolve_jsb_xj_card_labels,
+)
 from src.layout import NUM_CARDS, NUM_PLAYERS  # noqa: E402
 
 THRESHOLD = float(DETECTION_PARAMS["threshold"])
@@ -302,6 +310,109 @@ class CardContextRuleTests(unittest.TestCase):
                     resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, heroes),
                     expected,
                 )
+
+    def test_jsb_xj_templates_normalize_to_merged_label(self) -> None:
+        self.assertEqual(
+            normalize_template_label("黄·巨神兵.jpg"),
+            YELLOW_JSB_XJ_MERGED_LABEL,
+        )
+        self.assertEqual(
+            normalize_template_label("黄·迅迅迅捷双剑.jpg"),
+            YELLOW_JSB_XJ_MERGED_LABEL,
+        )
+        # Lookup / GT labels stay distinct; only template matching merges.
+        self.assertEqual(normalize_card_label("迅迅迅捷双剑"), YELLOW_XJ_LABEL)
+        self.assertEqual(normalize_card_label("黄·巨神兵"), YELLOW_JSB_LABEL)
+
+    def test_jsb_xj_identical_templates_collapse_gap(self) -> None:
+        details = [
+            _detail("黄·巨神兵.jpg", combined=0.90, shape=0.95, color=0.95),
+            _detail("黄·迅迅迅捷双剑.jpg", combined=0.90, shape=0.95, color=0.95),
+        ]
+        decision = select_card_match(details, threshold=THRESHOLD, min_gap=MIN_GAP)
+        self.assertEqual(decision.label, YELLOW_JSB_XJ_MERGED_LABEL)
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+
+    def test_jsb_xj_equipment_majority_rules(self) -> None:
+        cases = [
+            ([{"equipments": ["巨神兵之斧"]}], YELLOW_JSB_LABEL),
+            ([{"equipments": ["迅捷双剑"]}], YELLOW_XJ_LABEL),
+            ([{"equipments": ["核选巨神兵之斧"]}], YELLOW_JSB_LABEL),
+            ([{"equipments": ["核选迅捷双剑"]}], YELLOW_XJ_LABEL),
+            (
+                [{"equipments": ["巨神兵之斧", "巨神兵之斧", "迅捷双剑"]}],
+                YELLOW_JSB_LABEL,
+            ),
+            (
+                [{"equipments": ["巨神兵之斧", "迅捷双剑", "迅捷双剑"]}],
+                YELLOW_XJ_LABEL,
+            ),
+            ([], YELLOW_JSB_XJ_MERGED_LABEL),
+            (
+                [{"equipments": ["巨神兵之斧", "迅捷双剑"]}],
+                YELLOW_JSB_XJ_MERGED_LABEL,
+            ),
+        ]
+        for heroes, expected in cases:
+            with self.subTest(heroes=heroes, expected=expected):
+                self.assertEqual(
+                    resolve_card_label("黄·巨神兵", 0, heroes),
+                    expected,
+                )
+                self.assertEqual(
+                    resolve_card_label("黄·迅迅迅捷双剑", 1, heroes),
+                    expected,
+                )
+
+    def test_jsb_xj_batch_uses_clear_ratio_and_seed(self) -> None:
+        items = [
+            {
+                "label": "黄·巨神兵",
+                "slot_index": 0,
+                "heroes": [{"equipments": ["巨神兵之斧"]}],
+            },
+            {
+                "label": "黄·迅迅迅捷双剑",
+                "slot_index": 0,
+                "heroes": [{"equipments": ["迅捷双剑"]}],
+            },
+            {
+                "label": "黄·巨神兵",
+                "slot_index": 0,
+                "heroes": [{"equipments": ["巨神兵之斧"]}],
+            },
+            {
+                "label": "黄·迅迅迅捷双剑",
+                "slot_index": 1,
+                "heroes": [{"equipments": ["巨神兵之斧", "迅捷双剑"]}],
+            },
+            {
+                "label": "黄·巨神兵",
+                "slot_index": 2,
+                "heroes": [],
+            },
+        ]
+        first = resolve_jsb_xj_card_labels(items, seed=JSB_XJ_RATIO_SEED)
+        second = resolve_jsb_xj_card_labels(items, seed=JSB_XJ_RATIO_SEED)
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], YELLOW_JSB_LABEL)
+        self.assertEqual(first[1], YELLOW_XJ_LABEL)
+        self.assertEqual(first[2], YELLOW_JSB_LABEL)
+        self.assertIn(first[3], {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL})
+        self.assertIn(first[4], {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL})
+
+    def test_jsb_xj_batch_falls_back_to_even_ratio_without_clear_samples(self) -> None:
+        items = [
+            {"label": "黄·巨神兵", "slot_index": 0, "heroes": []},
+            {
+                "label": "黄·迅迅迅捷双剑",
+                "slot_index": 1,
+                "heroes": [{"equipments": ["巨神兵之斧", "迅捷双剑"]}],
+            },
+        ]
+        resolved = resolve_jsb_xj_card_labels(items, seed=0)
+        self.assertEqual(len(resolved), 2)
+        self.assertTrue(all(label in {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL} for label in resolved))
 
 
 class DetectCardsRoiTests(unittest.TestCase):

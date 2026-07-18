@@ -581,6 +581,104 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     assert stats.get_metrics("蓝·一起刷刷刷+天降啾啾pro", "蓝") is None
 
 
+def _build_jsb_xj_stats_db(tmp_path: Path) -> Path:
+    db_path = tmp_path / "jsb_xj.db"
+    conn = init_match_db(db_path)
+    try:
+        insert_match_entry(
+            conn,
+            "jsb_match.png",
+            _make_test_match_entry(
+                screenshot_name="jsb_match.png",
+                path="screenshots.0701/jsb_match.png",
+                players=[
+                    {
+                        "rank": 1,
+                        "row_index": 0,
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 2,
+                                "equipment_count": "1",
+                                "equipments": ["巨神兵之斧"],
+                            }
+                        ],
+                        # Stored template labels intentionally swapped vs equipment.
+                        "cards": [{"slot_index": 0, "card_name": "黄·迅迅迅捷双剑"}],
+                    },
+                    {
+                        "rank": 2,
+                        "row_index": 1,
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 2,
+                                "equipment_count": "1",
+                                "equipments": ["迅捷双剑"],
+                            }
+                        ],
+                        "cards": [{"slot_index": 0, "card_name": "黄·巨神兵"}],
+                    },
+                    {
+                        "rank": 3,
+                        "row_index": 2,
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 2,
+                                "equipment_count": "1",
+                                "equipments": ["巨神兵之斧"],
+                            }
+                        ],
+                        "cards": [{"slot_index": 0, "card_name": "黄·巨神兵"}],
+                    },
+                    {
+                        "rank": 4,
+                        "row_index": 3,
+                        "heroes": [
+                            {
+                                "slot_index": 0,
+                                "hero_name": "测试英雄",
+                                "stars": 1,
+                                "equipment_count": "2",
+                                "equipments": ["巨神兵之斧", "迅捷双剑"],
+                            }
+                        ],
+                        "cards": [{"slot_index": 0, "card_name": "黄·迅迅迅捷双剑"}],
+                    },
+                ],
+            ),
+        )
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_card_stats_jsb_xj_equipment_ratio_disambiguation(tmp_path: Path) -> None:
+    db_path = _build_jsb_xj_stats_db(tmp_path)
+    first = CardStatsIndex.from_db_path(db_path)
+    second = CardStatsIndex.from_db_path(db_path)
+
+    jsb = first.get_metrics("黄·巨神兵", "黄")
+    xj = first.get_metrics("黄·迅迅迅捷双剑", "黄")
+    assert jsb is not None
+    assert xj is not None
+    # Clear samples: 2 axe + 1 sword; one tie uses the 2:1 ratio with fixed seed.
+    assert jsb.appearances + xj.appearances == 4
+    assert jsb.appearances >= 2
+    assert xj.appearances >= 1
+    assert first.get_metrics("黄·巨神兵+迅迅迅捷双剑", "黄") is None
+
+    jsb2 = second.get_metrics("黄·巨神兵", "黄")
+    xj2 = second.get_metrics("黄·迅迅迅捷双剑", "黄")
+    assert jsb2 is not None and xj2 is not None
+    assert jsb.appearances == jsb2.appearances
+    assert xj.appearances == xj2.appearances
+
+
 def test_load_card_stats_prefers_db(tmp_path: Path) -> None:
     from scripts.card_pick_recommender import build_parser, load_card_stats
 

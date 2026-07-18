@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import random
+from collections import Counter
+from typing import Any, Sequence
+
 CARD_TYPE_PREFIXES = frozenset({"彩", "白", "蓝", "黄"})
 
 QUALITY_PARTNER_SUPPORT_GROUP = frozenset(
@@ -25,6 +29,14 @@ YELLOW_GONGMING_LABEL = "黄·装备共鸣"
 YELLOW_DLS_LABEL = "黄·大力巫术守护"
 CAI_GONGMING_PRO_LABEL = "彩·装备共鸣pro"
 CAI_GIFT_PACK_LABEL = "彩·法师战士射手礼包"
+
+YELLOW_JSB_LABEL = "黄·巨神兵"
+YELLOW_XJ_LABEL = "黄·迅迅迅捷双剑"
+YELLOW_JSB_XJ_MERGED_LABEL = "黄·巨神兵+迅迅迅捷双剑"
+YELLOW_JSB_XJ_GROUP = frozenset({"巨神兵", "迅迅迅捷双剑", "巨神兵+迅迅迅捷双剑"})
+JSB_EQUIPMENT = "巨神兵之斧"
+XJ_EQUIPMENT = "迅捷双剑"
+JSB_XJ_RATIO_SEED = 0x4A53425F584A  # "JSB_XJ"
 
 CARD_LABEL_ALIASES: dict[str, str] = {
     "重质也重量pro": QUALITY_WEIGHT_PRO_LABEL,
@@ -76,9 +88,14 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "彩·战士礼包": CAI_GIFT_PACK_LABEL,
     "蓝·半步满级": "蓝·半步满级+满级玩家",
     "蓝·满级玩家": "蓝·半步满级+满级玩家",
+    "迅迅迅捷双剑": YELLOW_XJ_LABEL,
+    "巨神兵": YELLOW_JSB_LABEL,
 }
 
 # Map merged template bodies to canonical bodies before context rules run.
+# Note: 巨神兵 / 迅迅迅捷双剑 stay as distinct labels here so DB lookup and
+# fuzzy match keep working; detect_cards.normalize_template_label merges them
+# for identical-icon template scoring only.
 TEMPLATE_BODY_ALIASES: dict[str, str] = {
     "吸吸宝pro快速成型": "快速成型",
 }
@@ -108,12 +125,50 @@ def normalize_card_label(label: str) -> str:
     return join_card_prefix(prefix, body)
 
 
+def normalize_equipment_base(equipment: str) -> str:
+    """Strip optional 核选 prefix from equipment names."""
+    return str(equipment).removeprefix("核选")
+
+
+def count_jsb_xj_equipment(heroes: Sequence[dict] | None) -> tuple[int, int]:
+    """Count 巨神兵之斧 / 迅捷双剑 equipment instances on the final board."""
+    jsb = 0
+    xj = 0
+    for hero in heroes or []:
+        for equipment in hero.get("equipments", []) or []:
+            base = normalize_equipment_base(equipment)
+            if base == JSB_EQUIPMENT:
+                jsb += 1
+            elif base == XJ_EQUIPMENT:
+                xj += 1
+    return jsb, xj
+
+
+def resolve_jsb_xj_from_counts(jsb_count: int, xj_count: int) -> str | None:
+    """Resolve by majority when counts differ; None means a tie (incl. both zero)."""
+    if jsb_count > xj_count:
+        return YELLOW_JSB_LABEL
+    if xj_count > jsb_count:
+        return YELLOW_XJ_LABEL
+    return None
+
+
+def is_jsb_xj_ambiguous_label(label: str) -> bool:
+    _, body = split_card_prefix(normalize_card_label(label))
+    return body in YELLOW_JSB_XJ_GROUP
+
+
 def resolve_card_label(
     label: str,
     slot_index: int,
     heroes: list[dict] | None = None,
 ) -> str:
-    """Apply static aliases and player-context card disambiguation."""
+    """Apply static aliases and player-context card disambiguation.
+
+    For 巨神兵 / 迅迅迅捷双剑 ties, returns the merged pending label.
+    Database consumers should call ``resolve_jsb_xj_card_labels`` for ratio-based
+    seeded assignment of those ties.
+    """
     label = normalize_card_label(label)
     prefix, body = split_card_prefix(label)
     heroes = heroes or []
@@ -138,7 +193,68 @@ def resolve_card_label(
         if jiujiu_count >= 2:
             return SSS_PRO_LABEL
         return SSS_NORMAL_LABEL
+    if body in YELLOW_JSB_XJ_GROUP:
+        jsb_count, xj_count = count_jsb_xj_equipment(heroes)
+        resolved = resolve_jsb_xj_from_counts(jsb_count, xj_count)
+        if resolved is not None:
+            return resolved
+        return YELLOW_JSB_XJ_MERGED_LABEL
     return label
+
+
+def resolve_jsb_xj_card_labels(
+    items: Sequence[dict[str, Any]],
+    *,
+    seed: int = JSB_XJ_RATIO_SEED,
+) -> list[str]:
+    """Resolve ambiguous 巨神兵 / 迅迅迅捷双剑 labels across a database snapshot.
+
+    Each item must provide:
+    - ``label``: raw or normalized card label
+    - ``slot_index``: card slot
+    - ``heroes``: player hero context with ``equipments``
+
+    Clear samples (rules 1-3) determine the ratio used for ties. Ties are
+    assigned with a fixed seed in stable input order so results are reproducible.
+    """
+    if not items:
+        return []
+
+    preliminary: list[str] = []
+    clear_counts: Counter[str] = Counter()
+    tie_indexes: list[int] = []
+
+    for index, item in enumerate(items):
+        label = str(item["label"])
+        slot_index = int(item["slot_index"])
+        heroes = item.get("heroes") or []
+        resolved = resolve_card_label(label, slot_index, heroes)
+        preliminary.append(resolved)
+        if resolved == YELLOW_JSB_XJ_MERGED_LABEL:
+            tie_indexes.append(index)
+        elif resolved in {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL} and is_jsb_xj_ambiguous_label(
+            label
+        ):
+            clear_counts[resolved] += 1
+
+    if not tie_indexes:
+        return preliminary
+
+    jsb_weight = clear_counts.get(YELLOW_JSB_LABEL, 0)
+    xj_weight = clear_counts.get(YELLOW_XJ_LABEL, 0)
+    if jsb_weight <= 0 and xj_weight <= 0:
+        jsb_weight = 1
+        xj_weight = 1
+
+    rng = random.Random(seed)
+    # Stable order: already follow input order; shuffle assignment targets by ratio.
+    total = jsb_weight + xj_weight
+    for index in tie_indexes:
+        pick = rng.randrange(total)
+        preliminary[index] = (
+            YELLOW_JSB_LABEL if pick < jsb_weight else YELLOW_XJ_LABEL
+        )
+    return preliminary
 
 
 def apply_card_context_rules(
