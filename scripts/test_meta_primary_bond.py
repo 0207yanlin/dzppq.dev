@@ -138,14 +138,70 @@ class PrimaryBondBusinessClassificationTests(unittest.TestCase):
     def test_qualified_bonds_tied_by_activation_count_all_count(self) -> None:
         board = feature(
             1,
-            totals={"音乐社": 3, "学习社": 3, "电玩社": 2},
-            active_traits={"音乐社": 3, "学习社": 3, "电玩社": 2},
+            totals={"音乐社": 4, "种地社": 4, "电玩社": 2},
+            active_traits={"音乐社": 4, "种地社": 4, "电玩社": 2},
         )
 
         self.assertEqual(
             set(MODULE.primary_bonds_by_count(board)),
-            {("音乐社", 3, 3), ("学习社", 3, 3)},
+            {("音乐社", 4, 4), ("种地社", 4, 4)},
         )
+
+    def test_study_tier4_excludes_other_qualified_bonds(self) -> None:
+        board = feature(
+            1,
+            totals={"学习社": 4, "种地社": 4, "座位更换者": 4},
+            active_traits={"学习社": 4, "种地社": 4, "座位更换者": 4},
+        )
+
+        self.assertEqual(MODULE.primary_bonds_by_count(board), [("学习社", 4, 4)])
+        self.assertEqual(
+            MODULE.primary_bond_business_selections(board)[0]["source"],
+            "study_override",
+        )
+
+    def test_study_tier4_overrides_higher_farming_count(self) -> None:
+        board = feature(
+            1,
+            totals={"学习社": 4, "种地社": 6},
+            active_traits={"学习社": 4, "种地社": 6},
+        )
+
+        self.assertEqual(MODULE.primary_bonds_by_count(board), [("学习社", 4, 4)])
+
+    def test_study_tier3_does_not_trigger_override(self) -> None:
+        board = feature(
+            1,
+            totals={"学习社": 3, "种地社": 4},
+            active_traits={"学习社": 3, "种地社": 4},
+        )
+
+        self.assertEqual(MODULE.primary_bonds_by_count(board), [("种地社", 4, 4)])
+
+    def test_study_override_covers_food_harvest(self) -> None:
+        board = feature(
+            1,
+            totals={"学习社": 4, "美食社": 2},
+            active_traits={"学习社": 4},
+            archetype="美食社收菜",
+            heroes=[hero_with_equipment("美味大餐")],
+        )
+
+        self.assertEqual(MODULE.primary_bonds_by_count(board), [("学习社", 4, 4)])
+        self.assertEqual(
+            MODULE.primary_bond_business_selections(board)[0]["source"],
+            "study_override",
+        )
+
+    def test_study_override_before_high_cost_pdd(self) -> None:
+        board = feature(
+            1,
+            totals={"学习社": 4},
+            active_traits={"学习社": 4},
+            archetype="高费拼多多",
+        )
+
+        self.assertEqual(MODULE.primary_bonds_by_count(board), [("学习社", 4, 4)])
 
     def test_high_cost_pdd_is_fallback_without_qualified_bond(self) -> None:
         board = feature(

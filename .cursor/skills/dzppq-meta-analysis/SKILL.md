@@ -58,7 +58,7 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Blue cards `蓝·一起刷刷刷` and `蓝·天降啾啾pro` share an icon but are disambiguated by final-board jiujiu equipment count (`>= 2` -> pro); never report them as one merged card statistic.
 - Yellow cards `黄·巨神兵` and `黄·迅迅迅捷双剑` share an icon but are disambiguated by final-board equipment counts of `巨神兵之斧` / `迅捷双剑` (axe-only -> 巨神兵, sword-only -> 迅迅迅捷双剑, both present -> majority); equal counts (including both zero) are assigned from the clear-sample ratio of the current database with a fixed seed. Never report them as one merged card statistic.
 - Do not recommend 3-star 4-cost or 5-cost carries as a normal requirement.
-- Primary bond strength uses business classification: food harvest -> `美食社`, factual bonds must reach the configured second threshold, ties by activation count are retained, and `高费拼多多` is the fallback when no factual bond qualifies.
+- Primary bond strength uses business classification: study club at the configured tier-4 threshold exclusively maps to `学习社` (covering food harvest and every other category); otherwise food harvest -> `美食社`, factual bonds must reach the configured second threshold, ties by activation count are retained, and `高费拼多多` is the fallback when no factual bond qualifies.
 - Merge duplicate comp rows into strategy-level recommendations with mature stages and transition stages.
 - Count cross-strategy contest pressure when strategies need the same 3-star main carry, even if their final bonds differ.
 - Treat weak lower-tier bond rows covered by a strong mature strategy as formation pressure, not standalone version traps.
@@ -88,7 +88,7 @@ Write concise Chinese conclusions. Include:
 - Jiujiu strength ranking and recommended comps for each jiujiu item.
 - Jiujiu recommended comps should include observed wearer heroes when available.
 - Version traps: popular but weak heroes, comps, bonds, equipment, or cards.
-- Primary bond strength ranking: business-classified bonds with `source` / `category` audit fields; food harvest -> `美食社`, second-threshold factual bonds, `高费拼多多` fallback.
+- Primary bond strength ranking: business-classified bonds with `source` / `category` audit fields; study club at configured tier-4 threshold exclusively maps to `学习社`, otherwise food harvest -> `美食社`, second-threshold factual bonds, `高费拼多多` fallback.
 - Balance-change tracking when the user provides patch notes.
 
 If a section is low confidence, keep it in the report but label it clearly instead of hiding it.

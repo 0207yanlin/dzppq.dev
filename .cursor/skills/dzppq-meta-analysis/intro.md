@@ -57,7 +57,7 @@ equipment_count*30 + selected_equipment_count*12 + stars*10 + tier*2 + max(0, 8-
 - `select_mature_stage()` emits `stage_inversion_diagnostics` when a higher-tier stage is rejected for worse performance.
 - High-cost 3-star dependency caps normal star advice at 2 stars and adds risk notes; do not emit separate ceiling recommendation sections.
 - `analyze_heroes_and_equipment()` exports truncated recommendation summaries plus untruncated `detail_items` (`appearances > 10`) for standalone HTML pages.
-- `primary_bond_business_selections()` / `analyze_primary_bond_strength()` classify food harvest, second-threshold bonds, and high-cost PDD fallback with `source` / `category` audit fields.
+- `primary_bond_business_selections()` / `analyze_primary_bond_strength()` classify study-club tier-4 override, food harvest, second-threshold bonds, and high-cost PDD fallback with `source` / `category` audit fields.
 - `attach_composition_trends()` adds rolling or balance-boundary trend windows per comp.
 
 ## Play Style Rules
@@ -85,7 +85,8 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - `render_md()` also includes low-cost 3-star carry difficulty, blue-card team-rank view, jiujiu wearer recommendations, and duo composition synergy when enough samples exist.
 - `render_interactive_html()` writes one tabbed dashboard at `data/环境分析详情.html`. It embeds sortable/filterable tables and paginated comp/trap detail panels.
 - The composition panel supports only `赌狗/高费` play-style filters plus paging. Archetype and confidence stay in the detail body, not as filter chips.
-- Equipment filter buttons keep `全部` neutral via CSS `:not([data-*="all"])`; only concrete tier/trait selections use the golden active style.
+- Equipment filter buttons keep `全部` neutral via CSS `.active[data-*="all"]`; only concrete tier/trait selections use the golden active style via `:not([data-*="all"])`.
+- Dashboard CSS declares `color-scheme: dark` and muted table/header/chip surfaces so equipment and jiujiu wearer panels are dark on first paint.
 - Hero equipment panel shows separate columns for normal / super / food recommendations; clicking a hero name opens `data/hero-equipment/<hero>.html` in a new tab with every single item whose raw appearances exceed 10.
 - `#super-equipment` and `#food-equipment` remain independent ranking pages with wearer recommendations.
 - `write_hero_equipment_pages()` cleans and regenerates `data/hero-equipment/` on every run.

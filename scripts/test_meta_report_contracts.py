@@ -890,6 +890,8 @@ def sample_data(**overrides) -> dict:
 
                 "source_definition": {
 
+                    "study_override": "学习社达到配置第三档（4学习）时独占归类",
+
                     "food_harvest": "收菜装备或美食社收菜原型",
 
                     "qualified_bond": "达到配置第二档的事实羁绊",
@@ -984,6 +986,8 @@ class MetaReportContractTests(unittest.TestCase):
 
         md = MODULE.render_md(sample_data())
 
+        self.assertIn("4学习独占", md)
+
         self.assertIn("收菜归美食社", md)
 
         self.assertIn("普通羁绊第二档门", md)
@@ -1068,6 +1072,8 @@ class MetaReportContractTests(unittest.TestCase):
 
         html = MODULE.render_interactive_html(sample_data())
 
+        self.assertIn("4学习独占", html)
+
         self.assertIn("收菜归美食社", html)
 
         self.assertIn("普通羁绊第二档门", html)
@@ -1082,9 +1088,50 @@ class MetaReportContractTests(unittest.TestCase):
 
         css = MODULE.interactive_dashboard_css()
 
+        self.assertIn(':root { color-scheme: dark; }', css)
+
         self.assertIn('.filter-btn.active:not([data-tier="all"])', css)
 
         self.assertIn('.trait-filter.active:not([data-trait="all"])', css)
+
+        self.assertIn('.filter-btn.active[data-tier="all"]', css)
+
+        self.assertIn('.trait-filter.active[data-trait="all"]', css)
+
+        self.assertNotIn(
+            '.filter-btn.active, .trait-filter.active, .style-filter.active {',
+            css,
+        )
+
+        self.assertIn('.sort-status {', css)
+
+        self.assertIn('font-size: 14px;', css)
+
+        self.assertIn('background: rgba(15,23,42,.55);', css)
+
+
+
+    def test_html_equipment_and_jiujiu_share_dark_table_surfaces(self) -> None:
+
+        data = sample_data()
+
+        html = MODULE.render_interactive_html(data)
+
+        css = MODULE.interactive_dashboard_css()
+
+        self.assertIn('data-hash="equipment"', html)
+
+        self.assertIn('data-hash="jiujiu-wearers"', html)
+
+        self.assertIn("佩戴啾啾棋子推荐", html)
+
+        self.assertIn("显示全部", html)
+
+        self.assertIn('color-scheme: dark', css)
+
+        self.assertIn('th.sort-asc, th.sort-desc { color: #fde68a; }', css)
+
+        self.assertIn('td { color: #cbd5e1;', css)
 
 
 

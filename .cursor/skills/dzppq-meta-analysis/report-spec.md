@@ -52,7 +52,8 @@ Apply filtering before all rankings:
 Separate from composition `main_bond` and from activated bond-tier rows in `heroes_and_equipment.bonds`:
 
 - Business classification is separate from factual `PlayerFeature.main_bond`.
-- Food-harvest equipment or `美食社收菜` archetype boards are assigned to `美食社`.
+- Study club at the configured tier-4 threshold (`dict_bond["学习社"][2]`, currently 4) exclusively maps to `学习社`, covering food harvest and every other business category.
+- Otherwise, food-harvest equipment or `美食社收菜` archetype boards are assigned to `美食社`.
 - Otherwise, only factual bonds that reach the configured second threshold qualify.
 - Qualified bonds are ranked by final activation count (`trait_totals`, including jiujiu bonus); ties at the max count are all retained.
 - If no factual bond qualifies and the archetype is `高费拼多多`, classify as `高费拼多多`.
@@ -305,7 +306,8 @@ Also write `data/环境分析详情.html`:
 - default panel order: composition recommendations, primary bond strength, equipment, super equipment, food equipment, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
 - support hash navigation such as `#equipment`, `#super-equipment`, `#food-equipment`, `#compositions`, and `#primary-bond`.
 - sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
-- equipment panel keeps cost/trait/search filters and sortable columns, plus separate super/food recommendation columns; default `全部` filters stay neutral, and only concrete selections use the golden active style via CSS `:not([data-*="all"])`.
+- equipment panel keeps cost/trait/search filters and sortable columns, plus separate super/food recommendation columns; default `全部` filters stay neutral via CSS `.active[data-*="all"]`, and only concrete selections use the golden active style via CSS `:not([data-*="all"])`.
+- dashboard CSS declares `color-scheme: dark` and uses muted table/header/chip surfaces so equipment and jiujiu panels stay dark on first paint, not only after filtering.
 - equipment hero names open standalone pages under `data/hero-equipment/` in a new browser tab; do not embed all per-hero detail sections into the dashboard.
 - super/food equipment panels show strength rank, sample metrics, confidence, recommended wearers, and low-sample notes.
 - composition panel keeps paginated comp detail pages with 7/8/9 board cards and only `赌狗/高费` style filters.

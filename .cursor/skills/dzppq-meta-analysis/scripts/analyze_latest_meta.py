@@ -116,6 +116,7 @@ RECOMMENDATION_CRITERION_LABELS: dict[str, str] = {
     "normal_cost_ceiling": "常规成型",
 }
 PRIMARY_BOND_SOURCE_LABELS: dict[str, str] = {
+    "study_override": "4学习独占",
     "food_harvest": "收菜归美食社",
     "qualified_bond": "普通羁绊第二档门",
     "high_cost_pdd": "高费拼多多兜底",
@@ -1397,9 +1398,30 @@ def primary_bond_business_selections(
 
     This is deliberately separate from ``PlayerFeature.main_bond``: the latter
     remains the factual leading active trait used by composition analysis.
+
+    Priority:
+    1. Study club at configured tier-4 threshold (exclusive; covers food harvest
+       and every other business category)
+    2. Food-harvest boards -> 美食社
+    3. Qualified factual bonds at the second configured threshold (ties retained)
+    4. High-cost PDD fallback
     """
     if bond_thresholds is None:
         _, bond_thresholds = load_game_config()
+
+    study_thresholds = bond_thresholds.get("学习社", [])
+    study_count = int(feature.trait_totals.get("学习社", 0))
+    study_tier4_min = study_thresholds[2] if len(study_thresholds) > 2 else 4
+    if study_count >= study_tier4_min:
+        return [
+            {
+                "bond": "学习社",
+                "category": "学习社",
+                "source": "study_override",
+                "activation_count": study_count,
+                "active_tier": active_tier(study_count, study_thresholds),
+            }
+        ]
 
     has_food_harvest = (
         feature.archetype == "美食社收菜"
@@ -1457,7 +1479,8 @@ def primary_bond_business_selections(
 def primary_bonds_by_count(feature: PlayerFeature) -> list[tuple[str, int, int]]:
     """Return business primary bonds as (category, count, active tier).
 
-    Food-harvest boards are assigned to 美食社. Normal factual traits must
+    Study club at the configured tier-4 threshold exclusively maps to 学习社.
+    Otherwise food-harvest boards map to 美食社. Normal factual traits must
     reach their configured second threshold; ties at the highest qualifying
     activation count are all retained. High-cost PDD is a final fallback.
     """
@@ -4053,12 +4076,15 @@ def analyze_primary_bond_strength(
 
     return {
         "definition": (
-            "主羁绊榜采用业务归类：有收菜装备或原型为美食社收菜的棋盘直接计入美食社；"
-            "普通事实羁绊须达到 config_s2.py 对应阈值列表的第二档，合格羁绊按最终激活人数"
-            "（含啾啾加成）取最大值，人数并列则同时计入；无合格羁绊且原型为高费拼多多时"
-            "归入高费拼多多，普通一级散搭不入榜。PlayerFeature 与阵容的 factual main_bond 不变。"
+            "主羁绊榜采用业务归类：学习社达到 config_s2.py 阈值列表的第三档（4学习）时"
+            "独占归类为学习社，覆盖美食社收菜与其他全部业务归类；否则有收菜装备或原型为"
+            "美食社收菜的棋盘计入美食社；普通事实羁绊须达到对应阈值列表的第二档，合格羁绊"
+            "按最终激活人数（含啾啾加成）取最大值，人数并列则同时计入；无合格羁绊且原型为"
+            "高费拼多多时归入高费拼多多，普通一级散搭不入榜。PlayerFeature 与阵容的"
+            "factual main_bond 不变。"
         ),
         "source_definition": {
+            "study_override": "学习社达到配置第三档（4学习）时独占归类",
             "food_harvest": "收菜装备或美食社收菜原型",
             "qualified_bond": "达到配置第二档的事实羁绊",
             "high_cost_pdd": "无合格事实羁绊的高费拼多多兜底",
@@ -4861,7 +4887,7 @@ def format_primary_bond_audit_text(primary_bond: dict[str, Any]) -> str:
             for key, label in source_labels.items()
         )
     else:
-        source_text = "收菜归美食社；普通羁绊第二档门；高费拼多多兜底"
+        source_text = "4学习独占；收菜归美食社；普通羁绊第二档门；高费拼多多兜底"
     source_distribution = format_primary_bond_source_distribution(
         primary_bond.get("source_distribution")
     )
@@ -6817,9 +6843,13 @@ def render_equipment_panel(
       if (show) visible += 1;
     }});
     if (filterStatusEl) {{
-      filterStatusEl.textContent = keyword
-        ? `筛选后 ${{visible}} 条 · 关键词「${{keyword}}」`
-        : `筛选后 ${{visible}} 条`;
+      if (activeTier === "all" && activeTrait === "all" && !keyword) {{
+        filterStatusEl.textContent = "显示全部";
+      }} else if (keyword) {{
+        filterStatusEl.textContent = `筛选后 ${{visible}} 条 · 关键词「${{keyword}}」`;
+      }} else {{
+        filterStatusEl.textContent = `筛选后 ${{visible}} 条`;
+      }}
     }}
   }}
 
@@ -7363,12 +7393,13 @@ def render_html_panels(data: dict[str, Any]) -> dict[str, str]:
 
 def interactive_dashboard_css() -> str:
     return """
+    :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background: #10131f;
       font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
-      color: #f8fafc;
+      color: #e2e8f0;
     }
     .dashboard {
       width: 1200px;
@@ -7376,15 +7407,15 @@ def interactive_dashboard_css() -> str:
       margin: 0 auto;
       padding: 28px 24px 42px;
       background:
-        radial-gradient(circle at 10% 0%, rgba(91,141,239,.45), transparent 28%),
-        radial-gradient(circle at 90% 4%, rgba(255,189,89,.32), transparent 24%),
+        radial-gradient(circle at 10% 0%, rgba(91,141,239,.28), transparent 28%),
+        radial-gradient(circle at 90% 4%, rgba(255,189,89,.18), transparent 24%),
         linear-gradient(145deg, #151a2d 0%, #0c1020 100%);
       min-height: 100vh;
     }
     .dashboard-header { margin-bottom: 16px; }
     .eyebrow { color: #fbbf24; font-weight: 800; letter-spacing: 4px; font-size: 14px; }
     .dashboard-header h1 { font-size: 36px; margin: 8px 0; line-height: 1.1; }
-    .sub { color: #cbd5e1; font-size: 17px; line-height: 1.45; }
+    .sub { color: #94a3b8; font-size: 17px; line-height: 1.45; }
     .tab-bar {
       display: flex;
       flex-wrap: wrap;
@@ -7392,23 +7423,23 @@ def interactive_dashboard_css() -> str:
       margin: 18px 0;
       padding: 12px;
       border-radius: 18px;
-      background: rgba(255,255,255,.08);
-      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(15,23,42,.72);
+      border: 1px solid rgba(255,255,255,.12);
       position: sticky;
       top: 0;
       z-index: 20;
       backdrop-filter: blur(8px);
     }
     .tab-btn {
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.08);
-      color: #e0f2fe;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.05);
+      color: #cbd5e1;
       border-radius: 999px;
       padding: 8px 14px;
       cursor: pointer;
       font-size: 13px;
     }
-    .tab-btn:hover { background: rgba(255,255,255,.14); }
+    .tab-btn:hover { background: rgba(255,255,255,.1); }
     .tab-btn.active {
       background: rgba(251,191,36,.22);
       color: #fde68a;
@@ -7426,18 +7457,18 @@ def interactive_dashboard_css() -> str:
       margin: 0 0 8px;
     }
     .sort-status {
-      color: #93c5fd;
-      font-size: 22px;
+      color: #94a3b8;
+      font-size: 14px;
       font-weight: 600;
-      line-height: 1.1;
+      line-height: 1.2;
       white-space: nowrap;
     }
     .note { color: #94a3b8; font-size: 15px; margin: 8px 0 14px; line-height: 1.45; }
     .table-wrap {
       overflow-x: auto;
-      border: 1px solid rgba(255,255,255,.14);
+      border: 1px solid rgba(255,255,255,.12);
       border-radius: 20px;
-      background: rgba(255,255,255,.06);
+      background: rgba(15,23,42,.55);
     }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td {
@@ -7448,21 +7479,23 @@ def interactive_dashboard_css() -> str:
     }
     th {
       position: sticky;
-      top: 0;
-      background: rgba(21,26,45,.96);
-      color: #fde68a;
+      top: 64px;
+      z-index: 10;
+      background: rgba(15,23,42,.96);
+      color: #cbd5e1;
       cursor: pointer;
       user-select: none;
       white-space: nowrap;
     }
+    th.sort-asc, th.sort-desc { color: #fde68a; }
     th.sort-asc::after { content: " ▲"; color: #93c5fd; }
     th.sort-desc::after { content: " ▼"; color: #93c5fd; }
-    tr:hover td { background: rgba(255,255,255,.04); }
+    tr:hover td { background: rgba(255,255,255,.03); }
     tr.hidden { display: none; }
-    td { color: #dbeafe; line-height: 1.35; overflow-wrap: anywhere; }
-    .strategy-cell .bond { color: #fde68a; font-weight: 700; }
+    td { color: #cbd5e1; line-height: 1.35; overflow-wrap: anywhere; }
+    .strategy-cell .bond { color: #e2e8f0; font-weight: 600; }
     .strategy-cell .carries {
-      color: #bfdbfe;
+      color: #94a3b8;
       font-size: 13px;
       margin-top: 4px;
       line-height: 1.3;
@@ -7477,11 +7510,11 @@ def interactive_dashboard_css() -> str:
     }
     .strategy-brief {
       display: inline-block;
-      background: rgba(255,255,255,.08);
+      background: rgba(255,255,255,.05);
       border-radius: 8px;
       padding: 3px 8px;
       font-size: 13px;
-      color: #e0f2fe;
+      color: #cbd5e1;
       overflow-wrap: anywhere;
     }
     .filter-bar {
@@ -7492,15 +7525,15 @@ def interactive_dashboard_css() -> str:
       margin-bottom: 14px;
       padding: 14px 16px;
       border-radius: 18px;
-      background: rgba(255,255,255,.08);
-      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(15,23,42,.55);
+      border: 1px solid rgba(255,255,255,.12);
     }
     .filter-group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .filter-label { color: #fde68a; font-size: 14px; font-weight: 700; margin-right: 4px; }
     .filter-btn, .trait-filter, .pager-btn, .style-filter {
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.08);
-      color: #e0f2fe;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.05);
+      color: #cbd5e1;
       border-radius: 999px;
       padding: 7px 12px;
       cursor: pointer;
@@ -7513,34 +7546,37 @@ def interactive_dashboard_css() -> str:
       color: #fde68a;
       border-color: rgba(251,191,36,.45);
     }
-    .filter-btn.active, .trait-filter.active, .style-filter.active {
-      background: rgba(255,255,255,.08);
-      color: #e0f2fe;
-      border-color: rgba(255,255,255,.18);
+    .filter-btn.active[data-tier="all"],
+    .trait-filter.active[data-trait="all"],
+    .style-filter.active[data-style="all"] {
+      background: rgba(255,255,255,.06);
+      color: #94a3b8;
+      border-color: rgba(255,255,255,.22);
     }
     .pager-btn:hover, .style-filter:hover, .filter-btn:hover, .trait-filter:hover {
-      background: rgba(255,255,255,.14);
+      background: rgba(255,255,255,.1);
     }
     .pager-btn:disabled { opacity: .55; cursor: default; }
     .search-input {
       min-width: 220px;
       flex: 1 1 220px;
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.08);
-      color: #f8fafc;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(15,23,42,.7);
+      color: #e2e8f0;
       border-radius: 12px;
       padding: 8px 12px;
       font-size: 14px;
     }
-    .filter-status, .page-status { color: #93c5fd; font-size: 14px; font-weight: 600; }
+    .filter-status, .page-status { color: #94a3b8; font-size: 14px; font-weight: 600; }
     .item-list { display: flex; flex-direction: column; gap: 4px; }
     .item-chip {
       display: inline-block;
-      background: rgba(255,255,255,.08);
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
       border-radius: 8px;
       padding: 3px 8px;
       font-size: 13px;
-      color: #e0f2fe;
+      color: #cbd5e1;
     }
     .pager-bar {
       display: flex;
@@ -7551,15 +7587,15 @@ def interactive_dashboard_css() -> str:
       margin: 0 0 16px;
       padding: 14px 16px;
       border-radius: 18px;
-      background: rgba(255,255,255,.08);
-      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(15,23,42,.55);
+      border: 1px solid rgba(255,255,255,.12);
     }
     .pager-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .comp-page { display: none; }
     .comp-page.active { display: block; }
     .comp-page-inner {
-      background: rgba(255,255,255,.09);
-      border: 1px solid rgba(255,255,255,.16);
+      background: rgba(15,23,42,.6);
+      border: 1px solid rgba(255,255,255,.12);
       border-radius: 28px;
       padding: 24px;
       box-shadow: 0 18px 50px rgba(0,0,0,.24);
@@ -7606,21 +7642,21 @@ def interactive_dashboard_css() -> str:
       font-size: 13px;
     }
     .comp-page-inner h2 { margin: 10px 0 0; font-size: 26px; line-height: 1.2; overflow-wrap: anywhere; }
-    .metrics { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; color: #bfdbfe; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; color: #94a3b8; }
     .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
     .detail-panel {
-      background: rgba(255,255,255,.05);
+      background: rgba(255,255,255,.04);
       border: 1px solid rgba(255,255,255,.1);
       border-radius: 20px;
       padding: 16px;
     }
     .detail-panel h3, .board-section h3 { margin: 0 0 10px; color: #fde68a; font-size: 20px; }
-    p { margin: 7px 0; color: #dbeafe; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+    p { margin: 7px 0; color: #cbd5e1; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
     .board-section { margin-top: 18px; }
     .board-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
     .board-card {
-      background: rgba(255,255,255,.06);
-      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.1);
       border-radius: 18px;
       padding: 14px;
       min-height: 210px;
@@ -7634,21 +7670,21 @@ def interactive_dashboard_css() -> str:
     }
     .level-badge { background: rgba(251,191,36,.22); color: #fde68a; }
     .source-badge { background: rgba(147,197,253,.18); color: #bfdbfe; }
-    .conf-badge { background: rgba(255,255,255,.08); color: #cbd5e1; }
+    .conf-badge { background: rgba(255,255,255,.06); color: #94a3b8; }
     .sample-badge { background: rgba(248,113,113,.18); color: #fecaca; }
-    .bond-note { color: #cbd5e1; font-size: 13px; line-height: 1.4; min-height: 38px; }
+    .bond-note { color: #94a3b8; font-size: 13px; line-height: 1.4; min-height: 38px; }
     .hero-chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .hero-chip {
-      background: rgba(255,255,255,.08);
+      background: rgba(255,255,255,.05);
       border-radius: 10px;
       padding: 4px 8px;
       font-size: 13px;
-      color: #fef3c7;
+      color: #e2e8f0;
       line-height: 1.3;
     }
     .trap-list { display: flex; flex-direction: column; gap: 18px; }
     .trap-card {
-      background: rgba(255,255,255,.09);
+      background: rgba(15,23,42,.6);
       border: 1px solid rgba(248,113,113,.24);
       border-radius: 28px;
       padding: 22px;
@@ -7670,12 +7706,13 @@ def interactive_dashboard_css() -> str:
       color: #fde68a;
       font-weight: 700;
       text-decoration: none;
-      border-bottom: 1px dashed rgba(253,230,138,.55);
+      border-bottom: 1px dashed rgba(253,230,138,.45);
     }
     .hero-equipment-link:hover { color: #fff7c2; }
     footer { margin-top: 22px; color: #94a3b8; font-size: 14px; text-align: center; }
     @media (max-width: 900px) {
       .detail-grid, .board-grid { grid-template-columns: 1fr; }
+      th { top: 0; }
     }
 """
 
