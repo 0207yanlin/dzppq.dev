@@ -87,6 +87,7 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - The composition panel supports only `赌狗/高费` play-style filters plus paging. Archetype and confidence stay in the detail body, not as filter chips.
 - Equipment filter buttons keep `全部` neutral via CSS `.active[data-*="all"]`; only concrete tier/trait selections use the golden active style via `:not([data-*="all"])`.
 - Dashboard CSS declares `color-scheme: dark` and muted table/header/chip surfaces so equipment and jiujiu wearer panels are dark on first paint.
+- Sticky table headers use `th { top: 0 }` inside `.table-wrap` so they stick to the scroll container top and never offset under the tab bar (which would cover the first data row).
 - Hero equipment panel shows separate columns for normal / super / food recommendations; clicking a hero name opens `data/hero-equipment/<hero>.html` in a new tab with every single item whose raw appearances exceed 10.
 - `#super-equipment` and `#food-equipment` remain independent ranking pages with wearer recommendations.
 - `write_hero_equipment_pages()` cleans and regenerates `data/hero-equipment/` on every run.

@@ -1084,6 +1084,62 @@ class MetaReportContractTests(unittest.TestCase):
 
 
 
+    def test_html_sticky_headers_stay_at_table_top(self) -> None:
+
+        css = MODULE.interactive_dashboard_css()
+
+        self.assertIn(
+            "th {\n      position: sticky;\n      top: 0;",
+            css,
+        )
+
+        self.assertNotIn("top: 64px", css)
+
+
+
+    def test_html_primary_bond_header_and_row_column_counts_match(self) -> None:
+
+        import re
+
+        panel = MODULE.render_primary_bond_strength_table_panel(
+            sample_data(), panel_id="panel-primary-bond"
+        )
+
+        expected_headers = [
+            "强度排名",
+            "主羁绊",
+            "归类",
+            "样本",
+            "修正名次",
+            "平均名次",
+            "前四率",
+            "后四率",
+            "吃鸡率",
+            "常见激活数量",
+            "常见激活档位",
+            "归类来源",
+        ]
+
+        headers = re.findall(r"<th\b[^>]*>(.*?)</th>", panel, flags=re.S)
+
+        self.assertEqual(headers, expected_headers)
+
+        body_rows = re.findall(r"<tbody>(.*?)</tbody>", panel, flags=re.S)
+
+        self.assertEqual(len(body_rows), 1)
+
+        data_rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", body_rows[0], flags=re.S)
+
+        self.assertGreaterEqual(len(data_rows), 1)
+
+        for row_html in data_rows:
+
+            cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, flags=re.S)
+
+            self.assertEqual(len(cells), len(expected_headers))
+
+
+
     def test_html_equipment_filters_keep_all_neutral_css(self) -> None:
 
         css = MODULE.interactive_dashboard_css()

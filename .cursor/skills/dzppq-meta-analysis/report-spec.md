@@ -308,6 +308,7 @@ Also write `data/环境分析详情.html`:
 - sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
 - equipment panel keeps cost/trait/search filters and sortable columns, plus separate super/food recommendation columns; default `全部` filters stay neutral via CSS `.active[data-*="all"]`, and only concrete selections use the golden active style via CSS `:not([data-*="all"])`.
 - dashboard CSS declares `color-scheme: dark` and uses muted table/header/chip surfaces so equipment and jiujiu panels stay dark on first paint, not only after filtering.
+- sticky table headers use `th { top: 0 }` so they stick to the `.table-wrap` top; do not use a positive viewport offset such as `top: 64px`, which covers the first data row inside the horizontal scroll container.
 - equipment hero names open standalone pages under `data/hero-equipment/` in a new browser tab; do not embed all per-hero detail sections into the dashboard.
 - super/food equipment panels show strength rank, sample metrics, confidence, recommended wearers, and low-sample notes.
 - composition panel keeps paginated comp detail pages with 7/8/9 board cards and only `赌狗/高费` style filters.

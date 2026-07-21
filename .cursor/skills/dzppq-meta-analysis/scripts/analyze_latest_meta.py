@@ -7479,7 +7479,7 @@ def interactive_dashboard_css() -> str:
     }
     th {
       position: sticky;
-      top: 64px;
+      top: 0;
       z-index: 10;
       background: rgba(15,23,42,.96);
       color: #cbd5e1;
@@ -7712,7 +7712,6 @@ def interactive_dashboard_css() -> str:
     footer { margin-top: 22px; color: #94a3b8; font-size: 14px; text-align: center; }
     @media (max-width: 900px) {
       .detail-grid, .board-grid { grid-template-columns: 1fr; }
-      th { top: 0; }
     }
 """
 
