@@ -5,7 +5,7 @@
 ## 项目内容
 
 - `src/`：识别和数据结构核心代码
-- `scripts/`：采集、标注、模板补全、数据库构建脚本
+- `scripts/`：采集、标注、一键批次处理、模板补全、数据库构建脚本
 - `assets/templates/`：英雄、卡牌、装备的图像模板
 - `screenshots.MMDD/`：对局截图目录，按批次存放（如 `screenshots.0705/`）
 - `data/match_ground_truth.json`：完整对局标注源，包含队友关系、英雄、星级、装备和卡牌
@@ -50,9 +50,9 @@ python scripts/build_match_database.py --db data/match_latest.db --force --allow
 核心脚本按顺序使用：
 
 1. `capture_daily_screenshots.py` — ADB 自动采集截图
-2. `label_match_ground_truth.py` — 预测与人工标注
+2. `process_match_batch.py` — 截图后一键完成标注、入库与环境分析（推荐日常入口）
 3. `suggest_template_candidates.py` — 模板候选生成与审核（有 unknown / 低分时）
-4. `build_match_database.py` — 构建或补充 SQLite 对局库
+4. 底层分步脚本（排查或高级用法）：`label_match_ground_truth.py`、`build_match_database.py`、`analyze_latest_meta.py`
 
 ---
 
@@ -60,21 +60,18 @@ python scripts/build_match_database.py --db data/match_latest.db --force --allow
 
 以下示例以 `0705` 批次为例，替换为你的 `MMDD` 即可。
 
-### 场景 A：采集当天数据并单批次建库
+### 场景 A：采集当天数据并完成标注 / 入库 / 环境分析
 
 ```powershell
 # 0. 采集当天对局，输出 screenshots.MMDD/
 python scripts/capture_daily_screenshots.py --connect
 
-# 1. 批量预测写入 GT（--workers 并行加速，默认 1）
-python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 --workers 4 predict --write
-
-# 2. 人工校正未验证截图（预测预取同样可并行，交互校正仍逐张进行）
-python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 --workers 4 label --all
-
-# 3. 构建当日 SQLite 库
-python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-prefix screenshots.0705/ --db data/matches_0705.db --predict --force
+# 1. 一键：交互标注未验证截图 -> 补入 data/match_latest.db -> 生成环境分析报告
+#    --batch 省略时默认使用今天的 MMDD；标注预测预取默认 --workers 4
+python scripts/process_match_batch.py --batch 0705
 ```
+
+等价于依次执行标注、入库、环境分析三步；任一步失败会立即停止。
 
 ### 场景 B：补采昨天或指定日期数据
 
@@ -86,28 +83,70 @@ python scripts/capture_daily_screenshots.py --connect --date 07-05
 python scripts/capture_daily_screenshots.py --connect --date 07-05 --output screenshots.0705
 ```
 
-补采完成后，按场景 A 的步骤 1–3 做预测、标注和建库。
+补采完成后：
+
+```powershell
+python scripts/process_match_batch.py --batch 0705
+```
 
 ### 场景 C：预测后发现 unknown / 低分，补模板后重新预测
 
 ```powershell
 python scripts/suggest_template_candidates.py generate --path-prefix screenshots.0705/
 python scripts/suggest_template_candidates.py review
-python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 --workers 4 predict --write
-python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-prefix screenshots.0705/ --db data/matches_0705.db --predict --force
+python scripts/process_match_batch.py --batch 0705
 ```
 
-审核通过的新模板写入 `assets/templates/heroes/` 或 `assets/templates/cards/`；映射到已有模板的修正会回写 `data/match_ground_truth.json`。
+审核通过的新模板写入 `assets/templates/heroes/` 或 `assets/templates/cards/`；映射到已有模板的修正会回写 `data/match_ground_truth.json`。`process_match_batch.py` 会重新走标注（跳过已验证）、补入统一库并刷新环境分析。
 
-### 场景 D：把新批次补充入统一最新库
+### 场景 D：只把已有 GT 批次补入统一最新库
+
+若标注已完成，只需重建库或刷新报告，可继续用底层命令：
 
 ```powershell
-python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-prefix screenshots.0705/ --db data/match_latest.db --predict --force
+python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-prefix screenshots.0705/ --db data/match_latest.db --force
+python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py --db data/match_latest.db
 ```
 
 - `--db` 决定写入哪个 SQLite 文件
 - `--path-prefix` 决定本次从 GT 中筛选哪个截图批次
 - 日常维护统一库时保持 `--db data/match_latest.db`，只改 `--path-prefix` 指向新批次
+
+---
+
+## 0b. 一键批次处理 — `process_match_batch.py`
+
+截图采集完成后的推荐入口。固定使用 `data/match_ground_truth.json` 与 `data/match_latest.db`，按批次目录 `screenshots.MMDD/` 依次执行：
+
+1. `label_match_ground_truth.py --workers 4 label --all`（预测预取可并行，交互校正仍逐张）
+2. `build_match_database.py --path-prefix screenshots.MMDD/ --db data/match_latest.db --force`（不重复预测）
+3. `analyze_latest_meta.py --db data/match_latest.db`
+
+### 常用命令
+
+```powershell
+# 处理今天批次（MMDD = 当天月日）
+python scripts/process_match_batch.py
+
+# 处理指定批次
+python scripts/process_match_batch.py --batch 0705
+
+# 调整标注预测并行度
+python scripts/process_match_batch.py --batch 0705 --workers 8
+
+# 只打印将要执行的命令，不真正跑
+python scripts/process_match_batch.py --batch 0705 --dry-run
+```
+
+### 常用参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--batch` | 今天的 `MMDD` | 对应 `screenshots.MMDD/` |
+| `--workers` | `4` | 传给标注脚本的预测预取并行数 |
+| `--dry-run` | 关 | 只打印子命令，不执行 |
+
+默认产物：更新后的 `data/match_ground_truth.json`、`data/match_latest.db`，以及环境分析相关文件（见下方「环境分析报告」一节）。
 
 ---
 
@@ -312,7 +351,7 @@ python scripts/build_match_database.py --screenshot-dir screenshots.0705 --path-
 
 ## 2c. 环境分析报告 — `dzppq-meta-analysis`
 
-基于最新对局库生成环境分析报告。生产脚本：
+基于最新对局库生成环境分析报告。日常推荐直接用 `process_match_batch.py`（标注 + 入库后会自动跑这一步）。单独生成时：
 
 ```powershell
 python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
