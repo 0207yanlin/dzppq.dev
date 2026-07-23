@@ -303,8 +303,15 @@ def test_dedup_key_stable_for_y_jitter() -> None:
 
 
 def test_resolution_constants() -> None:
+    from src.adb_capture import (
+        PROFILE_PARTY_REVIEW_ENTRY_BOX,
+        TAP_PROFILE_PARTY_REVIEW,
+    )
+
     assert EXPECTED_WM_SIZE == (1600, 2160)
     assert EXPECTED_SCREENSHOT_SIZE == (2160, 1600)
+    assert PROFILE_PARTY_REVIEW_ENTRY_BOX == (510, 450, 700, 550)
+    assert TAP_PROFILE_PARTY_REVIEW == (600, 500)
 
 
 def test_extract_ranking_entries_with_screen_coordinates() -> None:
@@ -660,6 +667,7 @@ def test_process_player_unstable_profile_with_entry_ready_continues() -> None:
         PartyReviewWaitResult,
         ProfilePartyReviewEntryWaitResult,
         SCREEN_PROFILE,
+        TAP_PROFILE_PARTY_REVIEW,
         WaitResult,
     )
 
@@ -672,6 +680,7 @@ def test_process_player_unstable_profile_with_entry_ready_continues() -> None:
     bot.run_dir = output_dir / "runs" / bot.run_id
     bot._next_expected_rank = 23
     img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
 
     profile_wait = WaitResult(
         screen=SCREEN_PROFILE,
@@ -689,31 +698,39 @@ def test_process_player_unstable_profile_with_entry_ready_continues() -> None:
         on_profile=True,
     )
     party_wait = PartyReviewWaitResult(
-        state="private",
+        state="public",
         img=img,
-        elapsed_ms=9000,
-        polls=3,
+        elapsed_ms=900,
+        polls=2,
         stable=True,
-        stable_hits_used=2,
+        stable_hits_used=1,
     )
 
-    bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
     bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
     bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
     bot._confirm_unstable_profile_entry = lambda rank: entry_wait  # type: ignore[method-assign]
     open_party_review_called = {"value": False}
+    matches_called = {"value": False}
 
     def open_party_review(rank: int):
         open_party_review_called["value"] = True
+        taps.append(TAP_PROFILE_PARTY_REVIEW)
         return entry_wait, party_wait
 
     bot.open_party_review = open_party_review  # type: ignore[method-assign]
+    bot.process_player_matches = lambda *args, **kwargs: matches_called.update(  # type: ignore[method-assign]
+        value=True
+    )
     bot.back_to_ranking = lambda: None  # type: ignore[method-assign]
 
     bot.process_player(23, 1, 700, 1000)
 
     assert open_party_review_called["value"] is True
-    assert bot.capture_state.get_rank_status(23) == "skipped"
+    assert matches_called["value"] is True
+    assert bot.capture_state.get_rank_status(23) == "completed"
+    assert (200, 400) not in taps
+    assert TAP_PROFILE_PARTY_REVIEW in taps
     assert any(
         event["event"] == "profile_unstable_but_entry_ready"
         for event in bot.events
@@ -722,7 +739,76 @@ def test_process_player_unstable_profile_with_entry_ready_continues() -> None:
     shutil.rmtree(output_dir, ignore_errors=True)
 
 
-def test_process_player_unstable_profile_without_entry_records_profile_entry_timeout() -> None:
+def test_process_player_unstable_profile_without_entry_skips_private_party() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "profile_private_party"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 27
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=15000,
+        polls=2,
+        stable=False,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=False,
+        img=img,
+        elapsed_ms=8000,
+        polls=3,
+        stable=False,
+        on_profile=True,
+    )
+
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot._confirm_unstable_profile_entry = lambda rank: entry_wait  # type: ignore[method-assign]
+    back_called = {"value": False}
+    bot.back_to_ranking = lambda: back_called.update(value=True)  # type: ignore[method-assign]
+    open_party_review_called = {"value": False}
+
+    def fake_open_party_review(rank: int):
+        open_party_review_called["value"] = True
+        raise AssertionError("should not open party review")
+
+    bot.open_party_review = fake_open_party_review  # type: ignore[method-assign]
+
+    bot.process_player(27, 1, 700, 1000)
+
+    assert open_party_review_called["value"] is False
+    assert back_called["value"] is True
+    assert (200, 400) not in taps
+    assert (600, 500) not in taps
+    record = bot.capture_state.get_rank_record(27)
+    assert record["status"] == "skipped"
+    assert record["skip_reason"] == "private_party_review"
+    assert any(
+        event["event"] == "player_skip" and event["reason"] == "private_party_review"
+        for event in bot.events
+    )
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_unstable_profile_left_page_records_profile_entry_timeout() -> None:
     import shutil
 
     import numpy as np
@@ -741,7 +827,7 @@ def test_process_player_unstable_profile_without_entry_records_profile_entry_tim
     bot = DailyCaptureBot(config)
     bot.run_id = "test-run"
     bot.run_dir = output_dir / "runs" / bot.run_id
-    bot._next_expected_rank = 27
+    bot._next_expected_rank = 28
     img = np.zeros((10, 10, 3), dtype=np.uint8)
 
     profile_wait = WaitResult(
@@ -757,7 +843,7 @@ def test_process_player_unstable_profile_without_entry_records_profile_entry_tim
         elapsed_ms=8000,
         polls=3,
         stable=False,
-        on_profile=True,
+        on_profile=False,
     )
 
     bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
@@ -765,20 +851,12 @@ def test_process_player_unstable_profile_without_entry_records_profile_entry_tim
     bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
     bot._confirm_unstable_profile_entry = lambda rank: entry_wait  # type: ignore[method-assign]
     bot.recover_to_ranking = lambda: None  # type: ignore[method-assign]
-    open_party_review_called = {"value": False}
 
-    def fake_open_party_review(rank: int):
-        open_party_review_called["value"] = True
-        raise AssertionError("should not open party review")
+    bot.process_player(28, 1, 700, 1000)
 
-    bot.open_party_review = fake_open_party_review  # type: ignore[method-assign]
-
-    bot.process_player(27, 1, 700, 1000)
-
-    assert open_party_review_called["value"] is False
-    record = bot.capture_state.get_rank_record(27)
+    record = bot.capture_state.get_rank_record(28)
     assert record["status"] == "failed"
-    assert str(record["failure_screenshot"]).endswith("rank_27_profile_entry_timeout.png")
+    assert str(record["failure_screenshot"]).endswith("rank_28_profile_entry_timeout.png")
     assert any(
         event["event"] == "player_error" and event["reason"] == "profile_entry_timeout"
         for event in bot.events
@@ -834,6 +912,199 @@ def test_process_player_unexpected_screen_still_records_failure() -> None:
         event["event"] == "player_error" and event["reason"] == "unexpected_screen"
         for event in bot.events
     )
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_hidden_party_review_no_tap() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "hidden_party_no_tap"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 5
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=800,
+        polls=2,
+        stable=True,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=False,
+        img=img,
+        elapsed_ms=800,
+        polls=2,
+        stable=False,
+        on_profile=True,
+    )
+
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot.open_party_review = lambda rank: (entry_wait, None)  # type: ignore[method-assign]
+    bot.back_to_ranking = lambda: None  # type: ignore[method-assign]
+    matches_called = {"value": False}
+    bot.process_player_matches = lambda *args, **kwargs: matches_called.update(  # type: ignore[method-assign]
+        value=True
+    )
+
+    bot.process_player(5, 1, 700, 500)
+
+    assert matches_called["value"] is False
+    assert (200, 400) not in taps
+    assert (600, 500) not in taps
+    record = bot.capture_state.get_rank_record(5)
+    assert record["status"] == "skipped"
+    assert record["skip_reason"] == "private_party_review"
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_public_party_review_taps_new_entry() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        PartyReviewWaitResult,
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        TAP_PROFILE_PARTY_REVIEW,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "public_party_tap"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 6
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=800,
+        polls=2,
+        stable=True,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=True,
+        img=img,
+        elapsed_ms=400,
+        polls=2,
+        stable=True,
+        on_profile=True,
+    )
+    party_wait = PartyReviewWaitResult(
+        state="public",
+        img=img,
+        elapsed_ms=500,
+        polls=2,
+        stable=True,
+        stable_hits_used=1,
+    )
+
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+
+    def open_party_review(rank: int):
+        taps.append(TAP_PROFILE_PARTY_REVIEW)
+        return entry_wait, party_wait
+
+    bot.open_party_review = open_party_review  # type: ignore[method-assign]
+    matches_called = {"value": False}
+    bot.process_player_matches = lambda *args, **kwargs: matches_called.update(  # type: ignore[method-assign]
+        value=True
+    )
+    bot.back_to_ranking = lambda: None  # type: ignore[method-assign]
+
+    bot.process_player(6, 1, 700, 640)
+
+    assert matches_called["value"] is True
+    assert (200, 400) not in taps
+    assert TAP_PROFILE_PARTY_REVIEW in taps
+    assert bot.capture_state.get_rank_status(6) == "completed"
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_process_player_party_review_timeout_after_entry() -> None:
+    import shutil
+
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import (
+        PartyReviewWaitResult,
+        ProfilePartyReviewEntryWaitResult,
+        SCREEN_PROFILE,
+        WaitResult,
+    )
+
+    output_dir = ROOT / "screenshots.test" / "party_timeout"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    config = CaptureConfig(output_dir=output_dir)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "test-run"
+    bot.run_dir = output_dir / "runs" / bot.run_id
+    bot._next_expected_rank = 7
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    profile_wait = WaitResult(
+        screen=SCREEN_PROFILE,
+        img=img,
+        elapsed_ms=800,
+        polls=2,
+        stable=True,
+    )
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=True,
+        img=img,
+        elapsed_ms=400,
+        polls=2,
+        stable=True,
+        on_profile=True,
+    )
+    party_wait = PartyReviewWaitResult(
+        state="timeout",
+        img=img,
+        elapsed_ms=12000,
+        polls=20,
+        stable=False,
+    )
+
+    bot.adb.tap = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    bot.adb.capture_bgr = lambda: img  # type: ignore[method-assign]
+    bot.screen.wait_for_screen = lambda *args, **kwargs: profile_wait  # type: ignore[method-assign]
+    bot.open_party_review = lambda rank: (entry_wait, party_wait)  # type: ignore[method-assign]
+    bot.back_to_ranking = lambda: None  # type: ignore[method-assign]
+
+    bot.process_player(7, 1, 700, 800)
+
+    record = bot.capture_state.get_rank_record(7)
+    assert record["status"] == "failed"
+    assert str(record["failure_screenshot"]).endswith("rank_07_party_review_timeout.png")
     shutil.rmtree(output_dir, ignore_errors=True)
 
 
@@ -985,19 +1256,32 @@ def test_check_device_reports_all_failures() -> None:
         assert "No healthy adb device found" in message
 
 
-def test_has_profile_party_review_entry_on_failure_screenshot() -> None:
-    import cv2
+def test_has_profile_party_review_entry_uses_new_roi() -> None:
+    import numpy as np
 
-    from src.adb_capture import OcrHelper, SCREEN_PROFILE, ScreenDetector
+    from src.adb_capture import (
+        PROFILE_PARTY_REVIEW_ENTRY_BOX,
+        OcrHelper,
+        ScreenDetector,
+    )
 
-    img_path = ROOT / "screenshots.0707" / "failures" / "rank_23_party_review_timeout.png"
-    if not img_path.exists():
-        return
-    img = cv2.imread(str(img_path))
-    assert img is not None
+    img = np.zeros((1600, 2160, 3), dtype=np.uint8)
     detector = ScreenDetector(OcrHelper())
-    assert detector.detect(img) == SCREEN_PROFILE
+    seen_boxes: list[tuple[int, int, int, int]] = []
+
+    def fake_ocr_text(_img: np.ndarray, box=None) -> str:
+        seen_boxes.append(box)
+        return "派对回顾"
+
+    detector.ocr.ocr_text = fake_ocr_text  # type: ignore[method-assign]
     assert detector.has_profile_party_review_entry(img) is True
+    assert seen_boxes == [PROFILE_PARTY_REVIEW_ENTRY_BOX]
+
+    detector.ocr.ocr_text = lambda _img, box=None: "派对回"  # type: ignore[method-assign]
+    assert detector.has_profile_party_review_entry(img) is True
+
+    detector.ocr.ocr_text = lambda _img, box=None: "战绩详情"  # type: ignore[method-assign]
+    assert detector.has_profile_party_review_entry(img) is False
 
 
 def test_wait_for_profile_party_review_entry_waits_for_stable_hits() -> None:
@@ -1079,10 +1363,45 @@ def test_open_party_review_retries_tap_when_still_on_profile() -> None:
 
     assert len(taps) == 2
     assert taps == [TAP_PROFILE_PARTY_REVIEW, TAP_PROFILE_PARTY_REVIEW]
+    assert TAP_PROFILE_PARTY_REVIEW == (600, 500)
+    assert (200, 400) not in taps
     assert entry_result.stable is True
+    assert party_result is not None
     assert party_result.state == "public"
     assert party_result.stable is True
     assert any(event["event"] == "party_review_tap_retry" for event in bot.events)
+
+
+def test_open_party_review_no_tap_when_entry_missing() -> None:
+    import numpy as np
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+    from src.adb_capture import ProfilePartyReviewEntryWaitResult
+
+    config = CaptureConfig(output_dir=ROOT / "screenshots.test")
+    bot = DailyCaptureBot(config)
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    taps: list[tuple[int, int]] = []
+
+    bot.adb.tap = lambda x, y, delay=0: taps.append((int(x), int(y)))  # type: ignore[method-assign]
+    entry_wait = ProfilePartyReviewEntryWaitResult(
+        ready=False,
+        img=img,
+        elapsed_ms=800,
+        polls=3,
+        stable=False,
+        on_profile=True,
+    )
+    bot.screen.wait_for_profile_party_review_entry = lambda *args, **kwargs: entry_wait  # type: ignore[method-assign]
+    bot.screen.wait_for_party_review = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("should not wait for party review")
+    )
+
+    entry_result, party_result = bot.open_party_review(rank=11)
+
+    assert entry_result.ready is False
+    assert party_result is None
+    assert taps == []
 
 
 def test_get_screen_size_error_includes_serial() -> None:
@@ -1138,8 +1457,12 @@ if __name__ == "__main__":
     test_capture_state_resume_skips_to_next_failed_rank()
     test_capture_state_resume_retries_first_of_multiple_failed_ranks()
     test_process_player_unstable_profile_with_entry_ready_continues()
-    test_process_player_unstable_profile_without_entry_records_profile_entry_timeout()
+    test_process_player_unstable_profile_without_entry_skips_private_party()
+    test_process_player_unstable_profile_left_page_records_profile_entry_timeout()
     test_process_player_unexpected_screen_still_records_failure()
+    test_process_player_hidden_party_review_no_tap()
+    test_process_player_public_party_review_taps_new_entry()
+    test_process_player_party_review_timeout_after_entry()
     test_output_isolation_run_dirs()
     test_save_failure_screenshot_uses_isolated_failures_dir()
     test_record_rank_failure_writes_state_and_event()
@@ -1154,8 +1477,9 @@ if __name__ == "__main__":
     test_check_device_falls_back_when_mumu_tcp_closed()
     test_check_device_fails_when_preferred_serial_unhealthy()
     test_check_device_reports_all_failures()
-    test_has_profile_party_review_entry_on_failure_screenshot()
+    test_has_profile_party_review_entry_uses_new_roi()
     test_wait_for_profile_party_review_entry_waits_for_stable_hits()
     test_open_party_review_retries_tap_when_still_on_profile()
+    test_open_party_review_no_tap_when_entry_missing()
     test_get_screen_size_error_includes_serial()
     print("all tests passed")

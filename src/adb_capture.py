@@ -33,7 +33,8 @@ TAP_RANKING_STEP1 = (200, 800)
 TAP_RANKING_STEP2 = (750, 350)
 TOP3_PLAYER_TAPS = [(700, 500), (700, 640), (700, 800)]
 SCROLL_PLAYER_TAPS = [(700, 933), (700, 1080)]
-TAP_PROFILE_PARTY_REVIEW = (200, 400)
+# Profile party-review entry button; validated in test_adb.ipynb (ROI center).
+TAP_PROFILE_PARTY_REVIEW = (600, 500)
 TAP_FILTER_PPQ = (2050, 500)
 TAP_MATCH_ENTRY_X = 1840
 TAP_SWITCH_SOLO_RANK = (200, 1500)
@@ -52,10 +53,9 @@ RANKING_TRANSIT_BOX = (1700, 700, 1900, 770)
 RANKING_SCREEN_BOX = (0, 0, 500, 200)
 MATCH_SCREEN_RANK_BOX = (100, 1400, 260, 1600)
 MATCH_DURATION_BOX = (1270, 100, 1390, 200)
-PARTY_REVIEW_PERMISSION_BOX = (600, 1000, 1800, 1200)
 PARTY_REVIEW_LIST_BOX = (400, 500, 900, 1100)
-# Left profile sidebar; validated on rank_23_party_review_timeout.png
-PROFILE_LEFT_MENU_BOX = (0, 90, 300, 760)
+# Profile page "派对回顾" button; validated in test_adb.ipynb.
+PROFILE_PARTY_REVIEW_ENTRY_BOX = (510, 450, 700, 550)
 RANKING_VISIBLE_RANKS_BOX = (500, 850, 600, 1100)
 
 SCREEN_MAIN = "游戏主界面"
@@ -66,7 +66,6 @@ SCREEN_MATCH_TEAM_RANK = "对局截图界面-队伍排名版"
 SCREEN_MATCH_SOLO_RANK = "对局截图界面-单人排名版"
 SCREEN_UNKNOWN = "未知界面"
 
-PARTY_REVIEW_PRIVATE_TEXT = "这名蛋仔设置了查阅权限"
 PROFILE_PARTY_REVIEW_ENTRY_TEXT = "派对回顾"
 PPQ_GAME_TEXT = "蛋仔碰碰棋"
 DUO_PEAK_TEXT = "双人巅峰"
@@ -1268,7 +1267,7 @@ class WaitResult:
 
 @dataclass
 class PartyReviewWaitResult:
-    state: str  # private | public | timeout
+    state: str  # public | timeout
     img: np.ndarray | None
     elapsed_ms: int
     polls: int
@@ -1322,7 +1321,7 @@ class ScreenDetector:
         return False
 
     def has_profile_party_review_entry(self, img: np.ndarray) -> bool:
-        text = self.ocr.ocr_text(img, PROFILE_LEFT_MENU_BOX)
+        text = self.ocr.ocr_text(img, PROFILE_PARTY_REVIEW_ENTRY_BOX)
         if PROFILE_PARTY_REVIEW_ENTRY_TEXT in text:
             return True
         # OCR may drop the last character on narrow crops.
@@ -1390,9 +1389,11 @@ class ScreenDetector:
         )
 
     def classify_party_review_state(self, img: np.ndarray) -> str | None:
-        """Return ``private``, ``public``, or ``None`` if still loading."""
-        if self.is_party_review_private(img):
-            return "private"
+        """Return ``public`` or ``None`` if still loading.
+
+        Privacy is decided on the profile page before tapping the entry;
+        this wait only confirms the party-review list has loaded.
+        """
         if self.has_party_review_content(img):
             return "public"
         if self.detect(img) != SCREEN_PROFILE:
@@ -1460,7 +1461,6 @@ class ScreenDetector:
         poll: float = 0.6,
         stable_hits: int = 2,
         public_stable_hits: int = 1,
-        private_stable_hits: int = 2,
         verbose: bool = False,
     ) -> PartyReviewWaitResult:
         start = time.time()
@@ -1469,6 +1469,7 @@ class ScreenDetector:
         polls = 0
         consecutive = 0
         stable_state = ""
+        _ = stable_hits  # retained for call-site compatibility
 
         while time.time() < deadline:
             polls += 1
@@ -1476,10 +1477,8 @@ class ScreenDetector:
             state = self.classify_party_review_state(last_img)
             if verbose:
                 logger.debug("wait_for_party_review poll=%s state=%s", polls, state)
-            if state in {"private", "public"}:
-                required_hits = (
-                    private_stable_hits if state == "private" else public_stable_hits
-                )
+            if state == "public":
+                required_hits = public_stable_hits
                 if state == stable_state:
                     consecutive += 1
                 else:
@@ -1527,7 +1526,3 @@ class ScreenDetector:
             verbose=False,
         )
         return result.screen
-
-    def is_party_review_private(self, img: np.ndarray) -> bool:
-        text = self.ocr.ocr_text(img, PARTY_REVIEW_PERMISSION_BOX)
-        return PARTY_REVIEW_PRIVATE_TEXT in text or "查阅权限" in text

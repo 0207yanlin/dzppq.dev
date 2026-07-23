@@ -156,7 +156,16 @@ python scripts/process_match_batch.py --batch 0705 --dry-run
 
 ## 0. 自动截图采集 — `capture_daily_screenshots.py`
 
-通过 ADB 自动遍历排行榜玩家，采集双人巅峰对局截图。进入派对回顾后直接扫描全部记录，由 OCR 识别「蛋仔碰碰棋」对局，不再点击类别筛选按钮。默认采集 rank 1–100，PNG 落盘到 `screenshots.MMDD/`（`MMDD` 由 `--date` 或当天日期决定）。
+通过 ADB 自动遍历排行榜玩家，采集双人巅峰对局截图。进入个人信息页后，先对 ROI `(510, 450, 700, 550)` 做 OCR：识别到「派对回顾」则点击 `(600, 500)` 进入派对回顾；未识别到则记为隐藏（`private_party_review`）并返回排行榜，**不会**再点击旧坐标 `(200, 400)`。进入派对回顾后直接扫描全部记录，由 OCR 识别「蛋仔碰碰棋 + 双人巅峰」对局，不再点击类别筛选按钮。默认采集 rank 1–100，PNG 落盘到 `screenshots.MMDD/`（`MMDD` 由 `--date` 或当天日期决定）。
+
+### UI 版本更新校准
+
+游戏改版后若入口位置变化，按以下顺序同步：
+
+1. 在 `test_adb.ipynb` 验证个人信息页 ROI / 点击点（当前：`(510,450,700,550)` → `tap(600,500)`）
+2. 将常量 promote 到 `src/adb_capture.py`（`PROFILE_PARTY_REVIEW_ENTRY_BOX`、`TAP_PROFILE_PARTY_REVIEW`）
+3. 运行 `python -m pytest scripts/test_capture_daily_screenshots.py -q`
+4. 小范围 dry-run：`python scripts/capture_daily_screenshots.py --connect --start-rank 1 --end-rank 5 --dry-run --debug-save-top-players 5 --verbose`
 
 ### 常用命令
 
@@ -200,7 +209,7 @@ python scripts/capture_daily_screenshots.py --connect --skip-players data/captur
 
 - `screenshots.MMDD/*.png` — 对局截图
 - `screenshots.MMDD/failures/*.png` — rank 处理失败时的现场截图
-- `screenshots.MMDD/capture_state.json` — 断点状态
+- `screenshots.MMDD/capture_state.json` — 断点状态（隐藏派对回顾记为 `skip_reason=private_party_review`）
 - `screenshots.MMDD/capture_log.json` — 完整日志
 - `screenshots.MMDD/latest_capture_log.json` — 最近一次运行日志
 - `screenshots.MMDD/runs/<run_id>/capture_log.json` — 单次运行日志

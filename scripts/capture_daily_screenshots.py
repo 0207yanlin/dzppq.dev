@@ -102,7 +102,6 @@ class CaptureConfig:
     debug_save_top_players: int = 0
     debug_save_top_matches: int = 0
     party_review_public_stable_hits: int = 1
-    party_review_private_stable_hits: int = 2
     skip_players_path: Path | None = None
     resume: bool = False
     reset_state: bool = False
@@ -839,7 +838,8 @@ class DailyCaptureBot:
     def open_party_review(
         self,
         rank: int,
-    ) -> tuple[ProfilePartyReviewEntryWaitResult, PartyReviewWaitResult]:
+    ) -> tuple[ProfilePartyReviewEntryWaitResult, PartyReviewWaitResult | None]:
+        """OCR profile entry first; tap only when ``派对回顾`` is visible."""
         party_wait: PartyReviewWaitResult | None = None
         entry_wait: ProfilePartyReviewEntryWaitResult | None = None
         max_party_review_tap_attempts = 2
@@ -867,16 +867,19 @@ class DailyCaptureBot:
                 elapsed_ms=entry_wait.elapsed_ms,
                 polls=entry_wait.polls,
             )
+            if not entry_wait.ready:
+                # Hidden entry or left profile — never blind-tap (600, 500).
+                return entry_wait, None
+
             self.adb.tap(*TAP_PROFILE_PARTY_REVIEW, delay=0)
             party_wait = self.screen.wait_for_party_review(
                 self.adb,
                 timeout=self.config.party_review_wait_timeout,
                 poll=self.config.screen_poll_interval,
                 public_stable_hits=self.config.party_review_public_stable_hits,
-                private_stable_hits=self.config.party_review_private_stable_hits,
                 verbose=self.config.verbose,
             )
-            if party_wait.state in {"private", "public"} and party_wait.stable:
+            if party_wait.state == "public" and party_wait.stable:
                 break
             if tap_attempt >= max_party_review_tap_attempts - 1:
                 break
@@ -890,8 +893,30 @@ class DailyCaptureBot:
                 break
 
         assert entry_wait is not None
-        assert party_wait is not None
         return entry_wait, party_wait
+
+    def _confirm_unstable_profile_entry(
+        self,
+        rank: int,
+    ) -> ProfilePartyReviewEntryWaitResult:
+        """When profile wait is unstable, use entry OCR as the final gate."""
+        entry_wait = self.screen.wait_for_profile_party_review_entry(
+            self.adb,
+            timeout=self.config.profile_party_review_entry_wait_timeout,
+            poll=self.config.screen_poll_interval,
+            stable_hits=self.config.profile_party_review_entry_stable_hits,
+            verbose=self.config.verbose,
+        )
+        self.log_event(
+            "profile_unstable_entry_confirm",
+            rank=rank,
+            ready=entry_wait.ready,
+            stable=entry_wait.stable,
+            on_profile=entry_wait.on_profile,
+            elapsed_ms=entry_wait.elapsed_ms,
+            polls=entry_wait.polls,
+        )
+        return entry_wait
 
     def process_player(self, rank: int, player_index: int, x: int, y: int) -> None:
         if rank < self._next_expected_rank:
@@ -968,7 +993,70 @@ class DailyCaptureBot:
                 self._debug_player_records.append(debug_record)
             self._next_expected_rank = max(self._next_expected_rank, rank + 1)
             return
-        if profile_wait.screen != SCREEN_PROFILE or not profile_wait.stable:
+
+        if profile_wait.screen == SCREEN_PROFILE and not profile_wait.stable:
+            entry_confirm = self._confirm_unstable_profile_entry(rank)
+            if entry_confirm.ready and entry_confirm.stable:
+                self.log_event(
+                    "profile_unstable_but_entry_ready",
+                    rank=rank,
+                    elapsed_ms=entry_confirm.elapsed_ms,
+                    polls=entry_confirm.polls,
+                )
+                # Fall through to open_party_review with a confirmed profile page.
+            elif entry_confirm.on_profile:
+                self.mark_player_processed(rank)
+                self.stats.players_skipped_private_party += 1
+                self.log_event(
+                    "player_skip",
+                    rank=rank,
+                    reason="private_party_review",
+                )
+                self.mark_rank_completed(rank, skip_reason="private_party_review")
+                self.emit_progress(rank, status="skipped")
+                if self.should_debug_save_player(rank):
+                    debug_record["profile_party_review_entry_wait"] = {
+                        "ready": entry_confirm.ready,
+                        "elapsed_ms": entry_confirm.elapsed_ms,
+                        "polls": entry_confirm.polls,
+                        "stable": entry_confirm.stable,
+                        "on_profile": entry_confirm.on_profile,
+                    }
+                    self._debug_player_records.append(debug_record)
+                self.back_to_ranking()
+                self._next_expected_rank = max(self._next_expected_rank, rank + 1)
+                return
+            else:
+                self.mark_player_processed(rank)
+                self.stats.errors.append(
+                    f"rank {rank}: profile entry timeout after unstable profile"
+                )
+                self.log_event(
+                    "player_error",
+                    rank=rank,
+                    reason="profile_entry_timeout",
+                    screen=profile_wait.screen,
+                    stable=profile_wait.stable,
+                )
+                if self.should_debug_save_player(rank):
+                    debug_record["profile_party_review_entry_wait"] = {
+                        "ready": entry_confirm.ready,
+                        "elapsed_ms": entry_confirm.elapsed_ms,
+                        "polls": entry_confirm.polls,
+                        "stable": entry_confirm.stable,
+                        "on_profile": entry_confirm.on_profile,
+                    }
+                    self._debug_player_records.append(debug_record)
+                self.record_rank_failure(
+                    rank,
+                    "profile_entry_timeout",
+                    img=entry_confirm.img if entry_confirm.img is not None else profile_wait.img,
+                )
+                self.emit_progress(rank, status="failed")
+                self.recover_to_ranking()
+                self._next_expected_rank = max(self._next_expected_rank, rank + 1)
+                return
+        elif profile_wait.screen != SCREEN_PROFILE or not profile_wait.stable:
             should_mark_processed = (
                 profile_wait.stable
                 and profile_wait.screen != SCREEN_UNKNOWN
@@ -1000,10 +1088,13 @@ class DailyCaptureBot:
 
         self.mark_player_processed(rank)
         entry_wait, party_wait = self.open_party_review(rank)
+        party_review_img = (
+            party_wait.img if party_wait is not None else entry_wait.img
+        )
         party_review_path = self.save_debug_screenshot(
             rank,
             "party_review_wait",
-            party_wait.img,
+            party_review_img,
         )
         debug_record["profile_party_review_entry_wait"] = {
             "ready": entry_wait.ready,
@@ -1012,27 +1103,28 @@ class DailyCaptureBot:
             "stable": entry_wait.stable,
             "on_profile": entry_wait.on_profile,
         }
-        debug_record["party_review_wait"] = {
-            "state": party_wait.state,
-            "elapsed_ms": party_wait.elapsed_ms,
-            "polls": party_wait.polls,
-            "stable": party_wait.stable,
-            "stable_hits_used": party_wait.stable_hits_used,
-        }
+        if party_wait is not None:
+            debug_record["party_review_wait"] = {
+                "state": party_wait.state,
+                "elapsed_ms": party_wait.elapsed_ms,
+                "polls": party_wait.polls,
+                "stable": party_wait.stable,
+                "stable_hits_used": party_wait.stable_hits_used,
+            }
+            self.log_event(
+                "party_review_wait_result",
+                rank=rank,
+                state=party_wait.state,
+                elapsed_ms=party_wait.elapsed_ms,
+                polls=party_wait.polls,
+                stable=party_wait.stable,
+                stable_hits_used=party_wait.stable_hits_used,
+            )
         debug_record["screenshots"]["party_review_wait"] = (
             str(party_review_path) if party_review_path else None
         )
-        self.log_event(
-            "party_review_wait_result",
-            rank=rank,
-            state=party_wait.state,
-            elapsed_ms=party_wait.elapsed_ms,
-            polls=party_wait.polls,
-            stable=party_wait.stable,
-            stable_hits_used=party_wait.stable_hits_used,
-        )
 
-        if party_wait.state == "private" and party_wait.stable:
+        if not entry_wait.ready and entry_wait.on_profile:
             self.stats.players_skipped_private_party += 1
             self.log_event("player_skip", rank=rank, reason="private_party_review")
             self.mark_rank_completed(rank, skip_reason="private_party_review")
@@ -1042,13 +1134,31 @@ class DailyCaptureBot:
             self.back_to_ranking()
             self._next_expected_rank = max(self._next_expected_rank, rank + 1)
             return
-        if party_wait.state == "timeout" or not party_wait.stable:
+        if not entry_wait.ready:
+            self.stats.errors.append(f"rank {rank}: profile entry timeout")
+            self.log_event(
+                "player_error",
+                rank=rank,
+                reason="profile_entry_timeout",
+            )
+            self.record_rank_failure(
+                rank,
+                "profile_entry_timeout",
+                img=entry_wait.img,
+            )
+            self.emit_progress(rank, status="failed")
+            if self.should_debug_save_player(rank):
+                self._debug_player_records.append(debug_record)
+            self.recover_to_ranking()
+            self._next_expected_rank = max(self._next_expected_rank, rank + 1)
+            return
+        if party_wait is None or party_wait.state == "timeout" or not party_wait.stable:
             self.stats.errors.append(f"rank {rank}: party review load timeout")
             self.log_event("player_skip", rank=rank, reason="party_review_timeout")
             self.record_rank_failure(
                 rank,
                 "party_review_timeout",
-                img=party_wait.img,
+                img=party_wait.img if party_wait is not None else entry_wait.img,
             )
             self.emit_progress(rank, status="failed")
             if self.should_debug_save_player(rank):
