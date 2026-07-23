@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,8 @@ if str(ROOT) not in sys.path:
 from scripts.label_match_ground_truth import (  # noqa: E402
     PredictionResult,
     apply_prediction_results,
+    build_parser,
+    command_label,
     run_parallel_predictions,
 )
 
@@ -83,3 +86,69 @@ def test_apply_prediction_results_writes_new_entries_only() -> None:
     assert "a.png" in gt_data["screenshots"]
     assert gt_data["screenshots"]["a.png"]["path"] == "a.png"
     assert "b.png" not in gt_data["screenshots"]
+
+
+def test_label_all_no_review_saves_unverified_and_skips_verified(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in ("new.png", "verified.png"):
+        (tmp_path / name).write_bytes(b"png")
+
+    gt_data = {
+        "screenshots": {
+            "verified.png": {
+                "path": "verified.png",
+                "players": [],
+                "verified": True,
+            }
+        }
+    }
+    ctx = SimpleNamespace(template_metadata={}, verbose=True)
+
+    monkeypatch.setattr(
+        "scripts.label_match_ground_truth.load_match_ground_truth",
+        lambda _path: gt_data,
+    )
+    monkeypatch.setattr(
+        "scripts.label_match_ground_truth.load_prediction_context",
+        lambda _args: ctx,
+    )
+    monkeypatch.setattr(
+        "scripts.label_match_ground_truth.save_match_ground_truth",
+        lambda _data, _path: None,
+    )
+
+    def fake_run(paths, *_args, **_kwargs):
+        assert [path.name for path in paths] == ["new.png"]
+        return [
+            PredictionResult(
+                img_path=paths[0],
+                entry={"path": "new.png", "players": [], "verified": False},
+            )
+        ]
+
+    monkeypatch.setattr(
+        "scripts.label_match_ground_truth.run_parallel_predictions",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "scripts.label_match_ground_truth.label_one_screenshot",
+        lambda *_args, **_kwargs: pytest.fail("interactive review must not run"),
+    )
+
+    args = build_parser().parse_args(
+        [
+            "--screenshot-dir",
+            str(tmp_path),
+            "--gt",
+            str(tmp_path / "gt.json"),
+            "label",
+            "--all",
+            "--no-review",
+        ]
+    )
+    command_label(args)
+
+    assert gt_data["screenshots"]["new.png"]["verified"] is False
+    assert gt_data["screenshots"]["verified.png"]["verified"] is True

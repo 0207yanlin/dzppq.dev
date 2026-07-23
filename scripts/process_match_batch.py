@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run label -> DB import -> meta analysis for one screenshot batch."""
+"""Run prediction -> DB import -> meta analysis for one screenshot batch."""
 
 from __future__ import annotations
 
@@ -74,6 +74,7 @@ def build_label_cmd(
         str(workers),
         "label",
         "--all",
+        "--no-review",
     ]
 
 
@@ -137,7 +138,7 @@ def process_batch(
         f"workers={workers}, gt={gt_path.name}, db={db_path.name}"
     )
 
-    print("\n[1/3] Label unverified screenshots")
+    print("\n[1/3] Predict unverified screenshots (no manual review)")
     runner(
         build_label_cmd(
             screenshot_dir=screenshot_dir,

@@ -61,7 +61,7 @@ def test_build_commands_include_expected_args() -> None:
     assert label_cmd[1].endswith("label_match_ground_truth.py")
     assert "--workers" in label_cmd
     assert label_cmd[label_cmd.index("--workers") + 1] == "4"
-    assert label_cmd[-2:] == ["label", "--all"]
+    assert label_cmd[-3:] == ["label", "--all", "--no-review"]
 
     import_cmd = build_import_cmd(
         screenshot_dir=screenshot_dir,
@@ -107,7 +107,7 @@ def test_process_batch_runs_three_steps_in_order(tmp_path: Path, monkeypatch) ->
     process_batch(batch=batch, workers=4, runner=fake_runner)
 
     assert len(calls) == 3
-    assert calls[0][-2:] == ["label", "--all"]
+    assert calls[0][-3:] == ["label", "--all", "--no-review"]
     assert calls[0][calls[0].index("--workers") + 1] == "4"
     assert "--path-prefix" in calls[1]
     assert calls[1][calls[1].index("--path-prefix") + 1] == "screenshots.0705/"

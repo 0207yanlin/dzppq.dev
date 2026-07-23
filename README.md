@@ -66,12 +66,13 @@ python scripts/build_match_database.py --db data/match_latest.db --force --allow
 # 0. 采集当天对局，输出 screenshots.MMDD/
 python scripts/capture_daily_screenshots.py --connect
 
-# 1. 一键：交互标注未验证截图 -> 补入 data/match_latest.db -> 生成环境分析报告
-#    --batch 省略时默认使用今天的 MMDD；标注预测预取默认 --workers 4
+# 1. 一键：预测未验证截图 -> 补入 data/match_latest.db -> 生成环境分析报告
+#    --batch 省略时默认使用今天的 MMDD；预测默认 --workers 4，不进入人工确认
 python scripts/process_match_batch.py --batch 0705
 ```
 
-等价于依次执行标注、入库、环境分析三步；任一步失败会立即停止。
+等价于依次执行预测、入库、环境分析三步；任一步失败会立即停止。自动预测保留
+`verified=false`，以便后续与人工审核数据区分，但不会阻止入库和报告生成。
 
 ### 场景 B：补采昨天或指定日期数据
 
@@ -97,7 +98,7 @@ python scripts/suggest_template_candidates.py review
 python scripts/process_match_batch.py --batch 0705
 ```
 
-审核通过的新模板写入 `assets/templates/heroes/` 或 `assets/templates/cards/`；映射到已有模板的修正会回写 `data/match_ground_truth.json`。`process_match_batch.py` 会重新走标注（跳过已验证）、补入统一库并刷新环境分析。
+审核通过的新模板写入 `assets/templates/heroes/` 或 `assets/templates/cards/`；映射到已有模板的修正会回写 `data/match_ground_truth.json`。`process_match_batch.py` 会重新预测未验证数据（跳过已验证）、补入统一库并刷新环境分析。
 
 ### 场景 D：只把已有 GT 批次补入统一最新库
 
@@ -118,9 +119,12 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py --db da
 
 截图采集完成后的推荐入口。固定使用 `data/match_ground_truth.json` 与 `data/match_latest.db`，按批次目录 `screenshots.MMDD/` 依次执行：
 
-1. `label_match_ground_truth.py --workers 4 label --all`（预测预取可并行，交互校正仍逐张）
+1. `label_match_ground_truth.py --workers 4 label --all --no-review`（并行预测并保存为未验证，不进入交互校正）
 2. `build_match_database.py --path-prefix screenshots.MMDD/ --db data/match_latest.db --force`（不重复预测）
 3. `analyze_latest_meta.py --db data/match_latest.db`
+
+如需人工审核，单独运行不带 `--no-review` 的 `label --all`；审核结果会标记为
+`verified=true`，下次一键处理会自动跳过。
 
 ### 常用命令
 
@@ -261,6 +265,7 @@ python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 lab
 | `--device` | 自动 | Torch 设备，如 `cpu` / `cuda` |
 | `--rebuild-cache` | 关 | 强制重建装备 embedding 缓存 |
 | `--no-templates` | 关 | 标注时不提示保存新模板 |
+| `--no-review` | 关 | 配合 `label --all` 保存未验证预测并跳过人工确认 |
 
 `label --all` 默认跳过已验证截图；`label --all --force` 才会重新标注已验证截图。
 

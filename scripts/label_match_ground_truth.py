@@ -487,6 +487,14 @@ def command_label(args: argparse.Namespace) -> None:
             apply_prediction_results(gt_data, results)
             save_match_ground_truth(gt_data, args.gt)
 
+        if args.no_review:
+            print(
+                f"Saved unverified predictions for {len(label_paths)} screenshot(s); "
+                "manual review skipped."
+            )
+            print(f"Ground truth: {args.gt}")
+            return
+
         label_progress = BatchProgress(len(label_paths), "Labeling")
         for img_path in label_paths:
             label_progress.advance(img_path.name)
@@ -597,6 +605,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not offer to save new hero/card templates",
     )
+    label.add_argument(
+        "--no-review",
+        action="store_true",
+        help="With --all, save unverified predictions without interactive review",
+    )
     label.set_defaults(func=command_label)
     return parser
 
@@ -605,6 +618,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command == "label" and not args.all and not args.screenshot:
         raise SystemExit("label requires a screenshot name, or use --all")
+    if args.command == "label" and args.no_review and not args.all:
+        raise SystemExit("--no-review requires label --all")
     args.func(args)
 
 
