@@ -13,13 +13,56 @@ from typing import Any
 
 import numpy as np
 
-from src.card_rules import CARD_TYPE_PREFIXES, join_card_prefix, normalize_card_label, split_card_prefix
+from src.card_rules import (
+    CARD_TYPE_PREFIXES,
+    FAST_XXB_LABEL,
+    FAST_XXB_PRO_LABEL,
+    KZDH_LABEL,
+    QUALITY_PARTNER_SUPPORT_LABEL,
+    QUALITY_WEIGHT_PRO_LABEL,
+    SSS_NORMAL_LABEL,
+    SSS_PRO_LABEL,
+    YELLOW_DEATH_ROCK_LABEL,
+    YELLOW_DLS_LABEL,
+    YELLOW_JSB_LABEL,
+    YELLOW_SHAKE_BOX_LABEL,
+    YELLOW_XJ_LABEL,
+    join_card_prefix,
+    normalize_card_label,
+    split_card_prefix,
+)
 from src.layout import HAND_CARD_BOXES, crop_hand_cards
 
 CARD_PREFIXES: tuple[str, ...] = ("白", "蓝", "黄", "彩")
 META_JSON_RELATIVE = Path("data") / "latest_meta_analysis.json"
 DEFAULT_META_JSON = Path(__file__).resolve().parent.parent / META_JSON_RELATIVE
 MIN_CARD_SAMPLES = 12
+
+# These are UI/OCR names, not canonical rewrites for stored match data.
+OCR_EXACT_QUERY_ALIASES: dict[str, str] = {
+    "蓝·开赞": KZDH_LABEL,
+    "蓝·开攒": KZDH_LABEL,
+    "蓝·天降啾啾": SSS_PRO_LABEL,
+}
+SHARED_STATS_LOOKUPS: dict[str, str] = {
+    "黄·大力": YELLOW_DLS_LABEL,
+    "黄·巫术": YELLOW_DLS_LABEL,
+    "黄·守护": YELLOW_DLS_LABEL,
+}
+LOGICAL_CARD_KEYS: tuple[str, ...] = (
+    KZDH_LABEL,
+    QUALITY_WEIGHT_PRO_LABEL,
+    QUALITY_PARTNER_SUPPORT_LABEL,
+    FAST_XXB_LABEL,
+    FAST_XXB_PRO_LABEL,
+    SSS_NORMAL_LABEL,
+    SSS_PRO_LABEL,
+    YELLOW_JSB_LABEL,
+    YELLOW_XJ_LABEL,
+    YELLOW_DEATH_ROCK_LABEL,
+    YELLOW_SHAKE_BOX_LABEL,
+    *SHARED_STATS_LOOKUPS,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +95,7 @@ class CardMatchResult:
     matched_key: str | None
     match_score: float
     metrics: CardMetrics | None = None
+    metrics_lookup_key: str | None = None
 
 
 @dataclass
@@ -77,17 +121,15 @@ def clean_ocr_text(text: str) -> str:
     """Normalize OCR output for card-name matching."""
     text = text.strip()
     text = re.sub(r"\s+", "", text)
-    normalized = normalize_card_label(text)
-    prefix, body = split_card_prefix(normalized)
+    prefix, body = split_card_prefix(text)
     if prefix in CARD_TYPE_PREFIXES:
         return body
 
     compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9+·]", "", text)
-    normalized = normalize_card_label(compact)
-    prefix, body = split_card_prefix(normalized)
+    prefix, body = split_card_prefix(compact)
     if prefix in CARD_TYPE_PREFIXES:
         return body
-    return compact or normalized
+    return compact
 
 
 def _similarity(left: str, right: str) -> float:
@@ -111,6 +153,20 @@ def fuzzy_match_card(
     direct_key = join_card_prefix(prefix, cleaned)
     if direct_key in catalog:
         return direct_key, 1.0, cleaned
+
+    exact_alias = OCR_EXACT_QUERY_ALIASES.get(direct_key)
+    if exact_alias in catalog:
+        return exact_alias, 1.0, cleaned
+
+    normalized_body = normalize_card_label(cleaned)
+    normalized_prefix, _ = split_card_prefix(normalized_body)
+    normalized_body_key = (
+        normalized_body
+        if normalized_prefix in CARD_TYPE_PREFIXES
+        else join_card_prefix(prefix, normalized_body)
+    )
+    if normalized_body_key in catalog:
+        return normalized_body_key, 0.98, cleaned
 
     normalized = normalize_card_label(direct_key)
     if normalized in catalog:
@@ -147,6 +203,7 @@ class CardStatsIndex:
         self.total_card_records = int(quality.get("cards", 0) or 0)
         self.by_prefix: dict[str, dict[str, CardMetrics]] = {p: {} for p in CARD_PREFIXES}
         self._load_rows(data)
+        self._ensure_logical_catalog()
 
     @classmethod
     def from_json_path(cls, path: Path | str) -> CardStatsIndex:
@@ -196,13 +253,43 @@ class CardStatsIndex:
                     avg_appearances_per_match=_safe_float(row.get("avg_appearances_per_match")),
                 )
 
+    @staticmethod
+    def metrics_lookup_key(key: str | None) -> str | None:
+        if not key:
+            return None
+        return SHARED_STATS_LOOKUPS.get(key, key)
+
+    def _ensure_logical_catalog(self) -> None:
+        """Keep known logical cards matchable even before they have samples."""
+        for key in LOGICAL_CARD_KEYS:
+            prefix, _ = split_card_prefix(key)
+            if prefix not in self.by_prefix:
+                continue
+            lookup_key = self.metrics_lookup_key(key)
+            metrics = self.by_prefix[prefix].get(lookup_key or "")
+            if metrics is None:
+                metrics = CardMetrics(
+                    key=lookup_key or key,
+                    prefix=prefix,
+                    appearances=0,
+                    adjusted_avg_rank=None,
+                    solo_avg_rank=None,
+                    solo_top4_rate=None,
+                    team_avg_rank=None,
+                    team_top2_rate=None,
+                    sample_weight_pct=0.0,
+                )
+                self.by_prefix[prefix].setdefault(lookup_key or key, metrics)
+            self.by_prefix[prefix].setdefault(key, metrics)
+
     def prefix_catalog(self, prefix: str) -> dict[str, CardMetrics]:
         return dict(self.by_prefix.get(prefix, {}))
 
     def get_metrics(self, key: str | None, prefix: str) -> CardMetrics | None:
-        if not key:
+        lookup_key = self.metrics_lookup_key(key)
+        if not lookup_key:
             return None
-        return self.by_prefix.get(prefix, {}).get(key)
+        return self.by_prefix.get(prefix, {}).get(lookup_key)
 
 
 def recognize_hand_cards(
@@ -235,7 +322,8 @@ def recognize_hand_cards(
     for slot, box in enumerate(HAND_CARD_BOXES):
         raw_text = ocr_texts.get(slot, "")
         matched_key, score, cleaned = fuzzy_match_card(raw_text, prefix, catalog)
-        metrics = stats.get_metrics(matched_key, prefix)
+        metrics_lookup_key = stats.metrics_lookup_key(matched_key)
+        metrics = stats.get_metrics(metrics_lookup_key, prefix)
         results.append(
             CardMatchResult(
                 slot=slot,
@@ -244,6 +332,7 @@ def recognize_hand_cards(
                 matched_key=matched_key,
                 match_score=score,
                 metrics=metrics,
+                metrics_lookup_key=metrics_lookup_key,
             )
         )
         _ = box  # box kept for future debug overlays
@@ -316,6 +405,18 @@ def display_card_name(card: CardMatchResult, *, max_len: int = 14) -> str:
     return name
 
 
+def _uses_shared_stats(card: CardMatchResult) -> bool:
+    lookup_key = card.metrics_lookup_key or CardStatsIndex.metrics_lookup_key(card.matched_key)
+    return bool(card.matched_key and lookup_key and card.matched_key != lookup_key)
+
+
+def _display_label(card: CardMatchResult) -> str:
+    label = card.matched_key or f"(未匹配: {card.cleaned_text or card.raw_text or '空'})"
+    if _uses_shared_stats(card):
+        return f"{label}（共享统计）"
+    return label
+
+
 def _card_warning_tags(card: CardMatchResult) -> list[str]:
     tags: list[str] = []
     if card.match_score < 0.75:
@@ -346,14 +447,18 @@ def format_compact_card_line(
     *,
     recommended: bool,
 ) -> str:
-    label = card.matched_key or f"(未匹配: {card.cleaned_text or card.raw_text or '空'})"
+    label = _display_label(card)
     prefix_star = "★ " if recommended else "  "
     slot_tag = f"卡{card.slot + 1}"
     metrics = card.metrics
-    if metrics is None or not metrics.has_stats:
+    if metrics is None:
         warn = " ".join(_card_warning_tags(card))
         warn_text = f" | {warn}" if warn else ""
-        return f"{prefix_star}{slot_tag} {label}{warn_text} | 无统计数据"
+        return f"{prefix_star}{slot_tag} {label}{warn_text} | 未匹配"
+    if not metrics.has_stats:
+        warn = " ".join(_card_warning_tags(card))
+        warn_text = f" | {warn}" if warn else ""
+        return f"{prefix_star}{slot_tag} {label}{warn_text} | 暂无统计"
 
     warn = " ".join(_card_warning_tags(card))
     warn_text = f" | {warn}" if warn else ""
@@ -456,11 +561,14 @@ def format_multi_sort(result: RecommendationResult) -> list[str]:
 
 
 def format_card_line(card: CardMatchResult, prefix: str, *, recommended: bool) -> str:
-    label = card.matched_key or f"(未匹配: {card.cleaned_text or card.raw_text or '空'})"
+    label = _display_label(card)
     prefix_tag = f"[{prefix}] "
     match_note = f"OCR={card.raw_text!r} -> {label} ({card.match_score:.0%})"
-    if card.metrics is None or not card.metrics.has_stats:
-        body = f"{prefix_tag}{'★ ' if recommended else ''}卡{card.slot + 1}: {label}\n  {match_note}\n  无统计数据"
+    if card.metrics is None:
+        body = f"{prefix_tag}{'★ ' if recommended else ''}卡{card.slot + 1}: {label}\n  {match_note}\n  未匹配"
+        return body
+    if not card.metrics.has_stats:
+        body = f"{prefix_tag}{'★ ' if recommended else ''}卡{card.slot + 1}: {label}\n  {match_note}\n  暂无统计"
         return body
 
     metrics = card.metrics

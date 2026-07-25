@@ -280,12 +280,16 @@ MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
     ("蓝", "蓝·一起刷刷刷", "蓝·一起刷刷刷"),
     ("蓝", "天降啾啾pro", "蓝·天降啾啾pro"),
     ("蓝", "蓝·天降啾啾pro", "蓝·天降啾啾pro"),
+    ("蓝", "天降啾啾", "蓝·天降啾啾pro"),
     ("蓝", "开攒", "蓝·开攒大亨"),
     ("蓝", "蓝·开攒", "蓝·开攒大亨"),
+    ("蓝", "开赞", "蓝·开攒大亨"),
+    ("蓝", "蓝·开赞", "蓝·开攒大亨"),
     ("蓝", "大亨", "蓝·开攒大亨"),
     ("蓝", "蓝·大亨", "蓝·开攒大亨"),
     ("蓝", "福袋", "蓝·福袋有钱"),
     ("蓝", "蓝·福袋", "蓝·福袋有钱"),
+    ("蓝", "福袋·蓝", "蓝·福袋有钱"),
     ("蓝", "有钱同享", "蓝·福袋有钱"),
     ("蓝", "蓝·有钱同享", "蓝·福袋有钱"),
     ("蓝", "利己主义", "蓝·波纹利己"),
@@ -295,9 +299,9 @@ MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
     ("黄", "黄·装备共鸣法", "黄·装备共鸣"),
     ("黄", "装备共鸣攻", "黄·装备共鸣"),
     ("黄", "装备共鸣血", "黄·装备共鸣"),
-    ("黄", "大力", "黄·大力巫术守护"),
-    ("黄", "巫术", "黄·大力巫术守护"),
-    ("黄", "守护", "黄·大力巫术守护"),
+    ("黄", "大力", "黄·大力"),
+    ("黄", "巫术", "黄·巫术"),
+    ("黄", "守护", "黄·守护"),
     ("彩", "装备共鸣法pro", "彩·装备共鸣pro"),
     ("彩", "彩·装备共鸣法pro", "彩·装备共鸣pro"),
     ("彩", "装备共鸣攻pro", "彩·装备共鸣pro"),
@@ -325,6 +329,78 @@ def test_fuzzy_match_last_ripple_stays_white_when_prefix_white() -> None:
     matched_key, score, _ = fuzzy_match_card("最后的波纹", "白", catalog)
     assert matched_key == "白·最后的波纹"
     assert score >= 0.9
+
+
+@pytest.mark.parametrize(
+    "prefix,logical_name",
+    [
+        ("蓝", "蓝·一起刷刷刷"),
+        ("蓝", "蓝·天降啾啾pro"),
+        ("蓝", "蓝·重质也重量pro"),
+        ("蓝", "蓝·拍档支援"),
+        ("黄", "黄·快速成型"),
+        ("黄", "黄·吸吸宝pro"),
+        ("黄", "黄·巨神兵"),
+        ("黄", "黄·迅迅迅捷双剑"),
+        ("黄", "黄·死亡摇滚"),
+        ("黄", "黄·摇盒高手"),
+    ],
+)
+def test_logical_catalog_matches_zero_sample_cards(prefix: str, logical_name: str) -> None:
+    stats = CardStatsIndex(
+        {
+            "overview": {"quality": {"matches": 0, "cards": 0}},
+            "rankings": {
+                "cards": {
+                    "single_cards_by_prefix": {},
+                    "blue_cards_team_rank_by_prefix": {},
+                }
+            },
+        }
+    )
+    matched_key, score, _ = fuzzy_match_card(logical_name, prefix, stats.prefix_catalog(prefix))
+    assert matched_key == logical_name
+    assert score == 1.0
+    metrics = stats.get_metrics(matched_key, prefix)
+    assert metrics is not None
+    assert not metrics.has_stats
+
+    card = CardMatchResult(
+        slot=0,
+        raw_text=logical_name,
+        cleaned_text=logical_name.split("·", 1)[1],
+        matched_key=matched_key,
+        match_score=score,
+        metrics=metrics,
+        metrics_lookup_key=stats.metrics_lookup_key(matched_key),
+    )
+    rendered = format_recommendation(build_recommendation(prefix, [card], stats))
+    assert "暂无统计" in rendered
+    assert "未匹配" not in rendered
+
+
+@pytest.mark.parametrize("logical_name", ["黄·大力", "黄·巫术", "黄·守护"])
+def test_shared_template_keeps_display_name_and_uses_merged_stats(logical_name: str) -> None:
+    stats = _merged_card_stats()
+    matched_key, score, _ = fuzzy_match_card(logical_name, "黄", stats.prefix_catalog("黄"))
+    assert matched_key == logical_name
+    lookup_key = stats.metrics_lookup_key(matched_key)
+    assert lookup_key == "黄·大力巫术守护"
+    metrics = stats.get_metrics(matched_key, "黄")
+    assert metrics is stats.get_metrics(lookup_key, "黄")
+
+    card = CardMatchResult(
+        slot=0,
+        raw_text=logical_name,
+        cleaned_text=logical_name.split("·", 1)[1],
+        matched_key=matched_key,
+        match_score=score,
+        metrics=metrics,
+        metrics_lookup_key=lookup_key,
+    )
+    rendered = format_recommendation(build_recommendation("黄", [card], stats))
+    assert logical_name in rendered
+    assert f"{logical_name}（共享统计）" in rendered
 
 
 def test_fuzzy_match_last_ripple_blue_fuzzy_to_boyl() -> None:
@@ -801,6 +877,60 @@ def test_load_real_meta_json_if_present() -> None:
     assert stats.total_card_records > 0
     assert "白" in stats.by_prefix
     assert len(stats.prefix_catalog("白")) > 0
+
+
+def test_build_release_validation_rejects_stale_or_merged_data(tmp_path: Path) -> None:
+    import json
+
+    import scripts.build_card_pick_recommender_exe as build_script
+
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "dist"
+    source_dir.mkdir()
+    (output_dir / "data").mkdir(parents=True)
+    (output_dir / "_internal" / "data").mkdir(parents=True)
+    source_db = source_dir / "match_latest.db"
+    source_json = source_dir / "latest_meta_analysis.json"
+    source_db.write_bytes(b"fresh-db")
+
+    rows = [{"key": key, "appearances": 0} for key in build_script.REQUIRED_SPLIT_CARD_KEYS]
+    payload = {
+        "rankings": {
+            "cards": {
+                "single_cards_by_prefix": {"蓝": rows, "黄": []},
+                "blue_cards_team_rank_by_prefix": {"蓝": []},
+            }
+        }
+    }
+    source_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    for data_dir in (output_dir / "data", output_dir / "_internal" / "data"):
+        (data_dir / source_db.name).write_bytes(source_db.read_bytes())
+        (data_dir / source_json.name).write_bytes(source_json.read_bytes())
+
+    with patch.object(build_script, "MATCH_DB", source_db), patch.object(
+        build_script, "META_JSON", source_json
+    ):
+        build_script.validate_runtime_data(output_dir, check_bundled=True)
+
+        (output_dir / "data" / source_db.name).write_bytes(b"stale-db")
+        with pytest.raises(SystemExit, match="stale copied runtime data"):
+            build_script.validate_runtime_data(output_dir, check_bundled=True)
+
+        (output_dir / "data" / source_db.name).write_bytes(source_db.read_bytes())
+        (output_dir / "_internal" / "data" / source_json.name).write_bytes(b"stale-json")
+        with pytest.raises(SystemExit, match="stale copied runtime data"):
+            build_script.validate_runtime_data(output_dir, check_bundled=True)
+
+        (output_dir / "_internal" / "data" / source_json.name).write_bytes(
+            source_json.read_bytes()
+        )
+        payload["rankings"]["cards"]["single_cards_by_prefix"]["蓝"].append(
+            {"key": "蓝·一起刷刷刷+天降啾啾pro", "appearances": 1}
+        )
+        source_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        (output_dir / "data" / source_json.name).write_bytes(source_json.read_bytes())
+        with pytest.raises(SystemExit, match="stale merged ranking keys"):
+            build_script.validate_runtime_data(output_dir)
 
 
 def test_runtime_build_label_source_mode() -> None:

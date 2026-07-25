@@ -396,6 +396,23 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 
 详细规则见 `.cursor/skills/dzppq-meta-analysis/`。
 
+### 桌面三选一卡牌推荐器
+
+推荐器通过界面文字 OCR 匹配逻辑卡名，再从最新 DB（不可用时回退 JSON）读取指标。共享模板按以下方式展示：
+
+- `黄·大力`、`黄·巫术`、`黄·守护` 保留 OCR 识别出的实际卡名，但共同读取 `黄·大力巫术守护` 指标，并标注“共享统计”。
+- SSS、FAST/XXB、QUALITY、JSB/XJ、死亡摇滚/摇盒高手等已能消歧的共享模板，按各自逻辑卡名匹配和统计；catalog 中已有但暂时为零样本的卡显示“暂无统计”。
+- `开赞` / `蓝·开赞` / `开攒` 仅在推荐器查询层纠正为 `蓝·开攒大亨`，不会改写统计 canonical 数据；`天降啾啾` 可查询 `蓝·天降啾啾pro`。
+
+发布 EXE 必须 clean rebuild，禁止复用旧 `dist` 数据。先刷新 `data/match_latest.db` 与
+`data/latest_meta_analysis.json`，再执行：
+
+```powershell
+python scripts/build_card_pick_recommender_exe.py --clean
+```
+
+构建脚本会在复制后校验外层 `dist/.../data` 与源数据逐字节一致，并检查 JSON 中共享模板拆分后的逻辑键完整、无旧 SSS 合并排行键；校验失败不会形成可发布构建。
+
 ---
 
 ## 3. 构建对局数据库 — `build_match_database.py`

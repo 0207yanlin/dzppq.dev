@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import Counter
 from typing import Any, Sequence
 
@@ -37,6 +38,13 @@ YELLOW_JSB_XJ_GROUP = frozenset({"巨神兵", "迅迅迅捷双剑", "巨神兵+�
 JSB_EQUIPMENT = "巨神兵之斧"
 XJ_EQUIPMENT = "迅捷双剑"
 JSB_XJ_RATIO_SEED = 0x4A53425F584A  # "JSB_XJ"
+
+YELLOW_DEATH_ROCK_LABEL = "黄·死亡摇滚"
+YELLOW_SHAKE_BOX_LABEL = "黄·摇盒高手"
+YELLOW_DEATH_ROCK_SHAKE_BOX_GROUP = frozenset({"死亡摇滚", "摇盒高手"})
+DEATH_ROCK_START_BATCH = "0723"
+DEATH_ROCK_HERO_NAME = "吉他手卡萝"
+_SCREENSHOT_BATCH_RE = re.compile(r"screenshots\.(\d{4})(?:[/\\]|$)", re.IGNORECASE)
 
 CARD_LABEL_ALIASES: dict[str, str] = {
     "重质也重量pro": QUALITY_WEIGHT_PRO_LABEL,
@@ -158,10 +166,26 @@ def is_jsb_xj_ambiguous_label(label: str) -> bool:
     return body in YELLOW_JSB_XJ_GROUP
 
 
+def card_rule_batch(
+    match_path: str | None = None,
+    match_batch: str | None = None,
+) -> str | None:
+    """Return an MMDD batch key from explicit batch or screenshot path."""
+    if match_batch:
+        batch = str(match_batch).strip()
+        if len(batch) == 4 and batch.isdigit():
+            return batch
+    match = _SCREENSHOT_BATCH_RE.search(str(match_path or "").replace("\\", "/"))
+    return match.group(1) if match else None
+
+
 def resolve_card_label(
     label: str,
     slot_index: int,
     heroes: list[dict] | None = None,
+    *,
+    match_path: str | None = None,
+    match_batch: str | None = None,
 ) -> str:
     """Apply static aliases and player-context card disambiguation.
 
@@ -193,6 +217,17 @@ def resolve_card_label(
         if jiujiu_count >= 2:
             return SSS_PRO_LABEL
         return SSS_NORMAL_LABEL
+    if body in YELLOW_DEATH_ROCK_SHAKE_BOX_GROUP:
+        batch = card_rule_batch(match_path, match_batch)
+        if batch is None:
+            return label
+        if batch < DEATH_ROCK_START_BATCH:
+            return YELLOW_SHAKE_BOX_LABEL
+        has_carol = any(
+            str(hero.get("hero_name", "")) == DEATH_ROCK_HERO_NAME
+            for hero in heroes
+        )
+        return YELLOW_DEATH_ROCK_LABEL if has_carol else YELLOW_SHAKE_BOX_LABEL
     if body in YELLOW_JSB_XJ_GROUP:
         jsb_count, xj_count = count_jsb_xj_equipment(heroes)
         resolved = resolve_jsb_xj_from_counts(jsb_count, xj_count)
@@ -202,20 +237,21 @@ def resolve_card_label(
     return label
 
 
-def resolve_jsb_xj_card_labels(
+def resolve_card_labels(
     items: Sequence[dict[str, Any]],
     *,
     seed: int = JSB_XJ_RATIO_SEED,
 ) -> list[str]:
-    """Resolve ambiguous 巨神兵 / 迅迅迅捷双剑 labels across a database snapshot.
+    """Resolve all contextual labels across a database snapshot.
 
     Each item must provide:
     - ``label``: raw or normalized card label
     - ``slot_index``: card slot
     - ``heroes``: player hero context with ``equipments``
+    - optional ``match_path``/``path`` or ``match_batch``/``batch``
 
-    Clear samples (rules 1-3) determine the ratio used for ties. Ties are
-    assigned with a fixed seed in stable input order so results are reproducible.
+    巨神兵 / 迅迅迅捷双剑 clear samples determine the ratio used for their
+    ties. Ties retain fixed-seed, stable-input-order assignment.
     """
     if not items:
         return []
@@ -228,7 +264,13 @@ def resolve_jsb_xj_card_labels(
         label = str(item["label"])
         slot_index = int(item["slot_index"])
         heroes = item.get("heroes") or []
-        resolved = resolve_card_label(label, slot_index, heroes)
+        resolved = resolve_card_label(
+            label,
+            slot_index,
+            heroes,
+            match_path=item.get("match_path") or item.get("path"),
+            match_batch=item.get("match_batch") or item.get("batch"),
+        )
         preliminary.append(resolved)
         if resolved == YELLOW_JSB_XJ_MERGED_LABEL:
             tie_indexes.append(index)
@@ -257,16 +299,34 @@ def resolve_jsb_xj_card_labels(
     return preliminary
 
 
+def resolve_jsb_xj_card_labels(
+    items: Sequence[dict[str, Any]],
+    *,
+    seed: int = JSB_XJ_RATIO_SEED,
+) -> list[str]:
+    """Compatibility wrapper for the former JSB/XJ-specific bulk entrypoint."""
+    return resolve_card_labels(items, seed=seed)
+
+
 def apply_card_context_rules(
     cards: list[dict],
     heroes: list[dict],
+    *,
+    match_path: str | None = None,
+    match_batch: str | None = None,
 ) -> list[dict]:
     """Return card dict copies with resolved labels."""
     resolved: list[dict] = []
     for card in cards:
         slot_index = int(card["slot_index"])
         raw_label = card.get("card_name") or card.get("label", "unknown")
-        label = resolve_card_label(raw_label, slot_index, heroes)
+        label = resolve_card_label(
+            raw_label,
+            slot_index,
+            heroes,
+            match_path=match_path,
+            match_batch=match_batch,
+        )
         updated = dict(card)
         if "card_name" in card:
             updated["card_name"] = label

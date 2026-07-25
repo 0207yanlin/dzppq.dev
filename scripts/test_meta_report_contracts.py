@@ -1290,6 +1290,102 @@ class MetaReportContractTests(unittest.TestCase):
 
 
 
+    def test_yellow_rock_template_expands_to_two_logical_catalog_keys(self) -> None:
+
+        self.assertEqual(
+            MODULE.MERGED_TEMPLATE_EXPANSIONS["黄·摇盒高手"],
+            ["黄·死亡摇滚", "黄·摇盒高手"],
+        )
+
+        yellow_catalog = MODULE.load_report_card_catalog()["黄"]
+
+        self.assertIn("黄·死亡摇滚", yellow_catalog)
+
+        self.assertIn("黄·摇盒高手", yellow_catalog)
+
+
+
+    def test_yellow_card_note_describes_rock_batch_and_carol_rule(self) -> None:
+
+        note = MODULE.CARD_MERGE_NOTES["黄"]
+
+        self.assertIn("死亡摇滚", note)
+
+        self.assertIn("摇盒高手", note)
+
+        self.assertIn("screenshots.0723", note)
+
+        self.assertIn("吉他手卡萝", note)
+
+        self.assertIn("更早批次一律为摇盒高手", note)
+
+
+
+    def test_generic_card_resolver_receives_rock_batch_and_hero_context(self) -> None:
+
+        resolved = MODULE.resolve_card_labels(
+            [
+                {
+                    "label": "黄·摇盒高手",
+                    "slot_index": 0,
+                    "path": "screenshots.0723/example.png",
+                    "batch": "0723",
+                    "heroes": [{"hero_name": "吉他手卡萝", "equipments": []}],
+                },
+                {
+                    "label": "黄·摇盒高手",
+                    "slot_index": 0,
+                    "path": "screenshots.0723/example.png",
+                    "batch": "0723",
+                    "heroes": [{"hero_name": "其他棋子", "equipments": []}],
+                },
+                {
+                    "label": "黄·摇盒高手",
+                    "slot_index": 0,
+                    "path": "screenshots.0722/example.png",
+                    "batch": "0722",
+                    "heroes": [{"hero_name": "吉他手卡萝", "equipments": []}],
+                },
+            ]
+        )
+
+        self.assertEqual(
+            resolved,
+            ["黄·死亡摇滚", "黄·摇盒高手", "黄·摇盒高手"],
+        )
+
+
+
+    def test_yellow_rock_cards_remain_independent_ranking_keys(self) -> None:
+
+        rows, by_prefix = MODULE.aggregate_single_cards_by_catalog(
+            [
+                ("黄·死亡摇滚", 1, 1.0),
+                ("黄·死亡摇滚", 3, 1.0),
+                ("黄·摇盒高手", 5, 1.0),
+            ],
+            baseline=4.5,
+            catalog={"黄": ["黄·死亡摇滚", "黄·摇盒高手"]},
+        )
+
+        yellow_rows = by_prefix["黄"]
+
+        self.assertEqual(
+            {row["key"] for row in yellow_rows},
+            {"黄·死亡摇滚", "黄·摇盒高手"},
+        )
+
+        self.assertEqual(
+            next(row for row in yellow_rows if row["key"] == "黄·死亡摇滚")[
+                "appearances"
+            ],
+            2,
+        )
+
+        self.assertNotIn("黄·死亡摇滚+摇盒高手", {row["key"] for row in rows})
+
+
+
     def test_composition_recommendations_keys_remain_compatible(self) -> None:
 
         eligible = sample_comp()

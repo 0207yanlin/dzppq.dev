@@ -127,6 +127,8 @@ def build_player_record(
 def merge_prediction(
     img: np.ndarray,
     *,
+    match_path: str | Path | None = None,
+    match_batch: str | None = None,
     hero_templates: dict | None = None,
     card_sigs: dict | None = None,
     equipment_templates: list | None = None,
@@ -213,6 +215,8 @@ def merge_prediction(
                     card["label"],
                     int(card["slot_index"]),
                     heroes_out,
+                    match_path=str(match_path) if match_path is not None else None,
+                    match_batch=match_batch,
                 ),
                 **(
                     {"score": float(card.get("score", 0.0))}
@@ -430,6 +434,7 @@ class PredictionContext:
         stage_started = time.perf_counter()
         prediction = merge_prediction(
             img,
+            match_path=img_path,
             hero_templates=self.hero_templates,
             card_sigs=self.card_sigs,
             equipment_templates=self.equipment_templates,

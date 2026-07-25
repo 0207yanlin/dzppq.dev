@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,14 +25,21 @@ from src.detect_cards import (  # noqa: E402
 )
 from src.card_rules import (  # noqa: E402
     JSB_XJ_RATIO_SEED,
+    YELLOW_DEATH_ROCK_LABEL,
     YELLOW_JSB_LABEL,
     YELLOW_JSB_XJ_MERGED_LABEL,
+    YELLOW_SHAKE_BOX_LABEL,
     YELLOW_XJ_LABEL,
     normalize_card_label,
     resolve_card_label,
+    resolve_card_labels,
     resolve_jsb_xj_card_labels,
 )
 from src.layout import NUM_CARDS, NUM_PLAYERS  # noqa: E402
+from scripts.normalize_card_ground_truth import (  # noqa: E402
+    normalize_ground_truth,
+    normalize_match_db,
+)
 
 THRESHOLD = float(DETECTION_PARAMS["threshold"])
 MIN_GAP = float(DETECTION_PARAMS["min_gap"])
@@ -269,6 +278,63 @@ class SelectCardMatchTests(unittest.TestCase):
 
 
 class CardContextRuleTests(unittest.TestCase):
+    def test_rock_box_0722_with_carol_stays_shake_box(self) -> None:
+        heroes = [{"hero_name": "吉他手卡萝"}]
+        self.assertEqual(
+            resolve_card_label(
+                YELLOW_SHAKE_BOX_LABEL,
+                0,
+                heroes,
+                match_path="screenshots.0722/example.png",
+            ),
+            YELLOW_SHAKE_BOX_LABEL,
+        )
+
+    def test_rock_box_0723_with_carol_is_death_rock(self) -> None:
+        heroes = [{"hero_name": "吉他手卡萝"}]
+        self.assertEqual(
+            resolve_card_label(
+                YELLOW_SHAKE_BOX_LABEL,
+                0,
+                heroes,
+                match_path=r"D:\dzppq.dev\screenshots.0723\example.png",
+            ),
+            YELLOW_DEATH_ROCK_LABEL,
+        )
+
+    def test_rock_box_0723_without_carol_stays_shake_box(self) -> None:
+        self.assertEqual(
+            resolve_card_label(
+                YELLOW_SHAKE_BOX_LABEL,
+                0,
+                [{"hero_name": "吉他手卡萝的朋友"}],
+                match_batch="0723",
+            ),
+            YELLOW_SHAKE_BOX_LABEL,
+        )
+
+    def test_rock_box_both_logical_inputs_resolve_stably(self) -> None:
+        items = [
+            {
+                "label": label,
+                "slot_index": index,
+                "heroes": [{"hero_name": "吉他手卡萝"}],
+                "match_batch": "0723",
+            }
+            for index, label in enumerate(
+                (YELLOW_SHAKE_BOX_LABEL, YELLOW_DEATH_ROCK_LABEL)
+            )
+        ]
+        self.assertEqual(
+            resolve_card_labels(items),
+            [YELLOW_DEATH_ROCK_LABEL, YELLOW_DEATH_ROCK_LABEL],
+        )
+        for label in (YELLOW_SHAKE_BOX_LABEL, YELLOW_DEATH_ROCK_LABEL):
+            self.assertEqual(
+                resolve_card_label(label, 0, [], match_batch="0723"),
+                YELLOW_SHAKE_BOX_LABEL,
+            )
+
     def test_sss_defaults_to_normal_without_equipment_context(self) -> None:
         for label in (
             "一起刷刷刷",
@@ -413,6 +479,90 @@ class CardContextRuleTests(unittest.TestCase):
         resolved = resolve_jsb_xj_card_labels(items, seed=0)
         self.assertEqual(len(resolved), 2)
         self.assertTrue(all(label in {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL} for label in resolved))
+
+
+class RockBoxNormalizerTests(unittest.TestCase):
+    def test_json_normalizer_uses_entry_path_and_enforces_batch_rule(self) -> None:
+        data = {
+            "screenshots": {
+                "old.png": {
+                    "path": "screenshots.0722/old.png",
+                    "players": [
+                        {
+                            "heroes": [{"hero_name": "吉他手卡萝"}],
+                            "cards": [
+                                {"slot_index": 0, "card_name": YELLOW_DEATH_ROCK_LABEL}
+                            ],
+                        }
+                    ],
+                },
+                "new.png": {
+                    "path": "screenshots.0723/new.png",
+                    "players": [
+                        {
+                            "heroes": [{"hero_name": "吉他手卡萝"}],
+                            "cards": [
+                                {"slot_index": 0, "card_name": YELLOW_SHAKE_BOX_LABEL}
+                            ],
+                        }
+                    ],
+                },
+            }
+        }
+        changes = normalize_ground_truth(data)
+        old_card = data["screenshots"]["old.png"]["players"][0]["cards"][0]
+        new_card = data["screenshots"]["new.png"]["players"][0]["cards"][0]
+        self.assertEqual(old_card["card_name"], YELLOW_SHAKE_BOX_LABEL)
+        self.assertEqual(new_card["card_name"], YELLOW_DEATH_ROCK_LABEL)
+        self.assertEqual(sum(changes.values()), 2)
+
+    def test_sqlite_normalizer_dry_run_uses_hero_name_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "matches.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE matches (
+                    id INTEGER PRIMARY KEY, path TEXT NOT NULL, match_date TEXT
+                );
+                CREATE TABLE players (
+                    id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL
+                );
+                CREATE TABLE heroes (
+                    id INTEGER PRIMARY KEY, player_id INTEGER NOT NULL,
+                    slot_index INTEGER NOT NULL, hero_name TEXT NOT NULL,
+                    stars INTEGER NOT NULL
+                );
+                CREATE TABLE hero_equipments (
+                    id INTEGER PRIMARY KEY, hero_id INTEGER NOT NULL,
+                    item_index INTEGER NOT NULL, equipment_name TEXT NOT NULL
+                );
+                CREATE TABLE cards (
+                    id INTEGER PRIMARY KEY, player_id INTEGER NOT NULL,
+                    slot_index INTEGER NOT NULL, card_name TEXT NOT NULL
+                );
+                INSERT INTO matches VALUES
+                    (1, 'screenshots.0723/example.png', '0723');
+                INSERT INTO players VALUES (1, 1);
+                INSERT INTO heroes VALUES (1, 1, 0, '吉他手卡萝', 1);
+                INSERT INTO cards VALUES (1, 1, 0, '黄·摇盒高手');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            changes = normalize_match_db(db_path, dry_run=True)
+            self.assertEqual(sum(changes.values()), 1)
+            conn = sqlite3.connect(db_path)
+            stored = conn.execute("SELECT card_name FROM cards").fetchone()[0]
+            conn.close()
+            self.assertEqual(stored, YELLOW_SHAKE_BOX_LABEL)
+
+            normalize_match_db(db_path)
+            conn = sqlite3.connect(db_path)
+            stored = conn.execute("SELECT card_name FROM cards").fetchone()[0]
+            conn.close()
+            self.assertEqual(stored, YELLOW_DEATH_ROCK_LABEL)
 
 
 class DetectCardsRoiTests(unittest.TestCase):

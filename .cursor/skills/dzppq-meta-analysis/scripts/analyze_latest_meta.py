@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 from src.card_rules import (  # noqa: E402
     normalize_card_label,
-    resolve_jsb_xj_card_labels,
+    resolve_card_labels,
     split_card_prefix,
 )
 from src.match_db import ensure_match_schema, parse_match_batch  # noqa: E402
@@ -146,6 +146,7 @@ MERGED_TEMPLATE_EXPANSIONS: dict[str, list[str]] = {
     "蓝·重质拍档支援": ["蓝·拍档支援", "蓝·重质也重量pro"],
     "蓝·一起刷刷刷+天降啾啾pro": ["蓝·一起刷刷刷", "蓝·天降啾啾pro"],
     "黄·巨神兵+迅迅迅捷双剑": ["黄·巨神兵", "黄·迅迅迅捷双剑"],
+    "黄·摇盒高手": ["黄·死亡摇滚", "黄·摇盒高手"],
 }
 LEGACY_CARD_TEMPLATE_NAMES = frozenset(
     {
@@ -177,6 +178,9 @@ CARD_MERGE_NOTES: dict[str, str] = {
         "巨神兵与迅迅迅捷双剑虽共用图标，已按最终阵容巨神兵之斧/迅捷双剑数量分别统计："
         "仅斧 -> 巨神兵，仅剑 -> 迅迅迅捷双剑，都有则数量占优；"
         "数量相同则按本次数据库明确样本比例并以固定种子可复现分配。"
+        "死亡摇滚与摇盒高手共用摇盒高手模板并分别统计：仅 screenshots.0723 起，"
+        "最终阵容有吉他手卡萝 -> 死亡摇滚，无吉他手卡萝 -> 摇盒高手；"
+        "更早批次一律为摇盒高手。"
     ),
 }
 
@@ -1265,10 +1269,17 @@ def load_player_features(
     cards_by_player: dict[int, list[str]] = defaultdict(list)
     card_rows = conn.execute(
         """
-        SELECT player_id, card_name, slot_index
-        FROM cards
-        WHERE player_id IN ({})
-        ORDER BY player_id, slot_index
+        SELECT
+            c.player_id,
+            c.card_name,
+            c.slot_index,
+            m.path AS match_path,
+            m.match_date AS match_batch
+        FROM cards c
+        JOIN players p ON p.id = c.player_id
+        JOIN matches m ON m.id = p.match_id
+        WHERE c.player_id IN ({})
+        ORDER BY c.player_id, c.slot_index
         """.format(",".join("?" for _ in kept_player_ids) or "NULL"),
         tuple(kept_player_ids),
     ).fetchall()
@@ -1280,8 +1291,11 @@ def load_player_features(
             continue
         player_id = int(row["player_id"])
         slot_index = int(row["slot_index"])
+        match_path = row["match_path"]
+        match_batch = row["match_batch"] or parse_match_batch(match_path)
         hero_context = [
             {
+                "hero_name": hero.name,
                 "stars": hero.stars,
                 "equipments": [equipment.raw_name for equipment in hero.equipments],
             }
@@ -1292,12 +1306,14 @@ def load_player_features(
                 "label": card_name,
                 "slot_index": slot_index,
                 "heroes": hero_context,
+                "path": match_path,
+                "batch": match_batch,
             }
         )
         resolve_player_ids.append(player_id)
     for player_id, resolved_name in zip(
         resolve_player_ids,
-        resolve_jsb_xj_card_labels(resolve_items),
+        resolve_card_labels(resolve_items),
         strict=True,
     ):
         cards_by_player[player_id].append(resolved_name)
@@ -5782,6 +5798,10 @@ def render_md(data: dict[str, Any]) -> str:
         "- 黄卡 `巨神兵` 与 `迅迅迅捷双剑` 共用图标，按最终阵容 `巨神兵之斧`/`迅捷双剑` 数量分别统计："
         "仅斧 -> 巨神兵，仅剑 -> 迅迅迅捷双剑，都有则数量占优；"
         "数量相同则按本次数据库明确样本比例并以固定种子可复现分配。"
+    )
+    lines.append(
+        "- 黄卡 `死亡摇滚` 与 `摇盒高手` 共用 `摇盒高手` 模板并分别统计：仅 `screenshots.0723` 起，"
+        "最终阵容有 `吉他手卡萝` -> 死亡摇滚，无卡萝 -> 摇盒高手；更早批次一律为摇盒高手。"
     )
     lines.append("- 低样本阵容、卡牌组合和队友配合只作为观察，不应单独作为上分结论。")
     return "\n".join(lines) + "\n"

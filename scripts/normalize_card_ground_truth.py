@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.card_rules import normalize_card_label, resolve_card_label  # noqa: E402
+from src.card_rules import (  # noqa: E402
+    normalize_card_label,
+    resolve_card_label,
+)
 from src.match_ground_truth import (  # noqa: E402
     DEFAULT_GT_PATH,
     load_match_ground_truth,
@@ -50,15 +53,19 @@ LEGACY_CARD_LABELS = frozenset(
 
 def normalize_ground_truth(data: dict) -> Counter:
     changes: Counter = Counter()
-    for entry in data.get("screenshots", {}).values():
+    for screenshot_name, entry in data.get("screenshots", {}).items():
+        match_path = entry.get("path") or screenshot_name
+        match_batch = entry.get("match_date")
         for player in entry.get("players", []):
             heroes = player.get("heroes", [])
             for card in player.get("cards", []):
                 old_name = card.get("card_name", "")
-                new_name = resolve_card_label(
-                    old_name,
-                    int(card["slot_index"]),
-                    heroes,
+                new_name = _resolve_normalized_label(
+                    old_name=old_name,
+                    slot_index=int(card["slot_index"]),
+                    heroes=heroes,
+                    match_path=match_path,
+                    match_batch=match_batch,
                 )
                 if new_name != old_name:
                     changes[f"{old_name} -> {new_name}"] += 1
@@ -66,20 +73,42 @@ def normalize_ground_truth(data: dict) -> Counter:
     return changes
 
 
-def normalize_match_db(db_path: Path) -> Counter:
+def _resolve_normalized_label(
+    *,
+    old_name: str,
+    slot_index: int,
+    heroes: list[dict],
+    match_path: str | None,
+    match_batch: str | None,
+) -> str:
+    """Normalize one label with its screenshot-batch context."""
+    normalized = normalize_card_label(old_name)
+    return resolve_card_label(
+        normalized,
+        slot_index,
+        heroes,
+        match_path=match_path,
+        match_batch=match_batch,
+    )
+
+
+def normalize_match_db(db_path: Path, *, dry_run: bool = False) -> Counter:
     changes: Counter = Counter()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
-        SELECT c.id, c.card_name, c.slot_index, c.player_id
+        SELECT c.id, c.card_name, c.slot_index, c.player_id,
+               m.path AS match_path, m.match_date AS match_batch
         FROM cards c
+        JOIN players p ON p.id = c.player_id
+        JOIN matches m ON m.id = p.match_id
         """
     ).fetchall()
     for row in rows:
         hero_rows = conn.execute(
             """
-            SELECT h.id, h.stars, he.equipment_name
+            SELECT h.id, h.hero_name, h.stars, he.equipment_name
             FROM heroes h
             LEFT JOIN hero_equipments he ON he.hero_id = h.id
             WHERE h.player_id = ?
@@ -93,6 +122,7 @@ def normalize_match_db(db_path: Path) -> Counter:
             hero_id = int(hero_row["id"])
             if hero_id not in heroes_by_id:
                 hero = {
+                    "hero_name": str(hero_row["hero_name"]),
                     "stars": int(hero_row["stars"] or 0),
                     "equipments": [],
                 }
@@ -102,24 +132,36 @@ def normalize_match_db(db_path: Path) -> Counter:
             if equipment_name and equipment_name != "unknown":
                 heroes_by_id[hero_id]["equipments"].append(str(equipment_name))
         old_name = str(row["card_name"])
-        new_name = resolve_card_label(old_name, int(row["slot_index"]), heroes)
+        new_name = _resolve_normalized_label(
+            old_name=old_name,
+            slot_index=int(row["slot_index"]),
+            heroes=heroes,
+            match_path=row["match_path"],
+            match_batch=row["match_batch"],
+        )
         if new_name != old_name:
             changes[f"{old_name} -> {new_name}"] += 1
             conn.execute(
                 "UPDATE cards SET card_name = ? WHERE id = ?",
                 (new_name, int(row["id"])),
             )
-    conn.commit()
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
     conn.close()
     return changes
 
 
 def command_normalize_db(args: argparse.Namespace) -> None:
-    changes = normalize_match_db(args.db)
+    changes = normalize_match_db(args.db, dry_run=args.dry_run)
     if not changes:
         print(f"No card name changes needed in {args.db}")
         return
-    print(f"Updated {args.db}")
+    if args.dry_run:
+        print("Dry run only; no database changes written.")
+    else:
+        print(f"Updated {args.db}")
     print("Card name replacements:")
     for key, count in sorted(changes.items()):
         print(f"  {key}: {count}")
@@ -178,6 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="SQLite match database path",
     )
+    normalize_db.add_argument("--dry-run", action="store_true")
     normalize_db.set_defaults(func=command_normalize_db)
     return parser
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,21 @@ OCR_HIDDEN_IMPORTS = [
 ]
 
 EXPECTED_ONNX_MODELS = 3
+REQUIRED_SPLIT_CARD_KEYS = frozenset(
+    {
+        "蓝·一起刷刷刷",
+        "蓝·天降啾啾pro",
+        "蓝·重质也重量pro",
+        "蓝·拍档支援",
+        "黄·快速成型",
+        "黄·吸吸宝pro",
+        "黄·巨神兵",
+        "黄·迅迅迅捷双剑",
+        "黄·死亡摇滚",
+        "黄·摇盒高手",
+    }
+)
+STALE_SPLIT_RANKING_KEYS = frozenset({"蓝·一起刷刷刷+天降啾啾pro"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,6 +234,68 @@ def validate_ocr_bundle(output_dir: Path, *, onefile: bool) -> None:
     )
 
 
+def _ranking_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        key = value.get("key")
+        if isinstance(key, str):
+            keys.add(key)
+        for child in value.values():
+            keys.update(_ranking_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            keys.update(_ranking_keys(child))
+    return keys
+
+
+def validate_runtime_data(output_dir: Path, *, check_bundled: bool = False) -> None:
+    """Verify copied runtime data is current and logical ranking keys are split."""
+    data_dirs = [output_dir / "data"]
+    if check_bundled:
+        data_dirs.append(output_dir / "_internal" / "data")
+    errors: list[str] = []
+    for data_dir in data_dirs:
+        for source in (MATCH_DB, META_JSON):
+            if not source.is_file():
+                continue
+            copied = data_dir / source.name
+            if not copied.is_file():
+                errors.append(f"missing copied runtime data: {copied}")
+            elif copied.read_bytes() != source.read_bytes():
+                errors.append(f"stale copied runtime data differs from source: {copied}")
+
+    copied_json = data_dirs[0] / META_JSON.name
+    if copied_json.is_file():
+        try:
+            payload = json.loads(copied_json.read_text(encoding="utf-8"))
+            cards = payload["rankings"]["cards"]
+            rows_by_prefix = cards["single_cards_by_prefix"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            errors.append(f"invalid card ranking JSON {copied_json}: {exc}")
+        else:
+            catalog_keys = {
+                str(row.get("key"))
+                for rows in rows_by_prefix.values()
+                if isinstance(rows, list)
+                for row in rows
+                if isinstance(row, dict) and row.get("key")
+            }
+            missing = sorted(REQUIRED_SPLIT_CARD_KEYS - catalog_keys)
+            if missing:
+                errors.append("missing split logical card keys: " + ", ".join(missing))
+
+            stale = sorted(STALE_SPLIT_RANKING_KEYS & _ranking_keys(cards))
+            if stale:
+                errors.append("stale merged ranking keys remain: " + ", ".join(stale))
+
+    if errors:
+        raise SystemExit("Runtime data validation failed:\n  - " + "\n  - ".join(errors))
+    print(
+        "Runtime data OK: source files match dist; "
+        f"split logical keys={len(REQUIRED_SPLIT_CARD_KEYS)}"
+    )
+
+
 def summarize_dist(output_dir: Path) -> None:
     if not output_dir.exists():
         return
@@ -265,6 +343,7 @@ def run_build(*, onefile: bool, clean: bool, full: bool) -> Path:
 
     summarize_dist(output_dir if not onefile else output_dir)
     validate_ocr_bundle(output_dir if not onefile else output_dir, onefile=onefile)
+    validate_runtime_data(output_dir, check_bundled=not onefile)
     return exe_path
 
 
