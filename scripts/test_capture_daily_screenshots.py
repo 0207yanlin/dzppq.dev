@@ -27,6 +27,7 @@ from src.adb_capture import (  # noqa: E402
     filter_new_match_entries,
     has_target_date_on_page,
     is_before_target_date,
+    is_exact_rank_visible,
     is_partial_rank_ocr,
     make_global_match_id,
     make_match_dedup_key,
@@ -549,6 +550,22 @@ def test_build_next_rank_spec_ignores_partial_rank_ocr() -> None:
     assert skipped == []
     assert wait_reason == "ranking_partial_rank_ocr"
     assert is_partial_rank_ocr(9, 19) is True
+
+
+def test_exact_next_rank_visible_defers_ranking_swipe() -> None:
+    entries = [
+        RankingEntry(rank=23, tap_y=900, raw_text="23"),
+        RankingEntry(rank=24, tap_y=1000, raw_text="24"),
+    ]
+    assert is_exact_rank_visible(entries, 24) is True
+
+
+def test_partial_next_rank_requires_ranking_swipe() -> None:
+    entries = [
+        RankingEntry(rank=23, tap_y=900, raw_text="23"),
+        RankingEntry(rank=4, tap_y=1000, raw_text="4"),
+    ]
+    assert is_exact_rank_visible(entries, 24) is False
 
 
 def test_compute_next_target_rank_skips_manual_and_completed() -> None:
@@ -1452,6 +1469,8 @@ if __name__ == "__main__":
     test_swipe_ranking_one_player_constant()
     test_build_next_rank_spec_rejects_jump_to_larger_rank()
     test_build_next_rank_spec_ignores_partial_rank_ocr()
+    test_exact_next_rank_visible_defers_ranking_swipe()
+    test_partial_next_rank_requires_ranking_swipe()
     test_compute_next_target_rank_skips_manual_and_completed()
     test_capture_state_resume_and_preload_match_ids()
     test_capture_state_resume_skips_to_next_failed_rank()

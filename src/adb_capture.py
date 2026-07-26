@@ -433,6 +433,14 @@ def is_partial_rank_ocr(visible_rank: int, next_target_rank: int) -> bool:
     return next_target_rank >= 10 and next_target_rank % 10 == visible_rank
 
 
+def is_exact_rank_visible(
+    entries: list[RankingEntry],
+    target_rank: int,
+) -> bool:
+    """Return whether OCR contains the complete target rank, not just its trailing digit."""
+    return any(entry.rank == target_rank for entry in entries)
+
+
 def compute_next_target_rank(
     start_rank: int,
     end_rank: int,

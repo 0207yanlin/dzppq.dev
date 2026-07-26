@@ -60,6 +60,7 @@ from src.adb_capture import (  # noqa: E402
     filter_new_match_entries,
     has_target_date_on_page,
     is_before_target_date,
+    is_exact_rank_visible,
     make_global_match_id,
     make_mumu_filename,
     match_date_part,
@@ -791,7 +792,8 @@ class DailyCaptureBot:
 
             if self._next_expected_rank > self.config.end_rank:
                 break
-            self.swipe_ranking()
+            if not is_exact_rank_visible(ranking_entries, self._next_expected_rank):
+                self.swipe_ranking()
 
     def build_scroll_player_specs(
         self,
