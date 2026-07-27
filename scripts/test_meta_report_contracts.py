@@ -1253,11 +1253,17 @@ class MetaReportContractTests(unittest.TestCase):
 
 
 
-    def test_blue_card_note_does_not_claim_merged_sss_stats(self) -> None:
+    def test_blue_card_note_describes_new_merged_statistics(self) -> None:
 
         note = MODULE.CARD_MERGE_NOTES["蓝"]
 
-        self.assertIn("分别统计", note)
+        self.assertIn("我们全都要，一起刷刷刷 -> 我们全都要+一起刷刷刷", note)
+
+        self.assertIn("我是老大，快速成长 -> 我是老大+快速成长", note)
+
+        self.assertIn("专业打手，冒险 -> 专业打手+冒险", note)
+
+        self.assertIn("啾啾装备数量分别统计", note)
 
         self.assertNotIn("一起刷刷刷+天降啾啾pro", note)
 

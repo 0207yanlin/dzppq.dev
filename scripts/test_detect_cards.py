@@ -248,6 +248,35 @@ class SelectCardMatchTests(unittest.TestCase):
             {"shape_family_color_rescue", "shape_cluster_color", "combined"},
         )
 
+    def test_bloom_family_color_rescue_selects_each_prefix(self) -> None:
+        labels = ("白·百花齐放", "黄·百花齐放pro", "彩·百花齐放max")
+        for expected in labels:
+            with self.subTest(expected=expected):
+                details = [
+                    _detail(
+                        f"{label}.jpg",
+                        combined=0.80 if label == expected else 0.82,
+                        shape=0.79 if label == expected else 0.90,
+                        color=0.98 if label == expected else 0.78,
+                    )
+                    for label in labels
+                ]
+                decision = self._select(details)
+                self.assertEqual(decision.label, expected)
+                self.assertEqual(
+                    decision.debug["match_path"], "shape_family_color_rescue"
+                )
+
+    def test_bloom_family_rejects_insufficient_color_gap(self) -> None:
+        details = [
+            _detail("白·百花齐放.jpg", combined=0.80, shape=0.86, color=0.90),
+            _detail("黄·百花齐放pro.jpg", combined=0.79, shape=0.86, color=0.88),
+            _detail("彩·百花齐放max.jpg", combined=0.78, shape=0.86, color=0.87),
+        ]
+        decision = self._select(details)
+        self.assertIsNone(decision.label)
+        self.assertEqual(decision.debug["reject_reason"], "below_min_gap")
+
     def test_unrelated_card_stays_on_combined_path(self) -> None:
         details = [
             _detail("白·法力专注.jpg", combined=0.90, shape=0.88, color=0.90),
@@ -329,35 +358,59 @@ class CardContextRuleTests(unittest.TestCase):
             resolve_card_labels(items),
             [YELLOW_DEATH_ROCK_LABEL, YELLOW_DEATH_ROCK_LABEL],
         )
-        for label in (YELLOW_SHAKE_BOX_LABEL, YELLOW_DEATH_ROCK_LABEL):
-            self.assertEqual(
-                resolve_card_label(label, 0, [], match_batch="0723"),
-                YELLOW_SHAKE_BOX_LABEL,
-            )
+        self.assertEqual(
+            resolve_card_label(YELLOW_SHAKE_BOX_LABEL, 0, [], match_batch="0723"),
+            YELLOW_SHAKE_BOX_LABEL,
+        )
+        self.assertEqual(
+            resolve_card_label(YELLOW_DEATH_ROCK_LABEL, 0, [], match_batch="0723"),
+            YELLOW_DEATH_ROCK_LABEL,
+        )
+
+    def test_blue_shake_box_is_not_rewritten_by_yellow_rule(self) -> None:
+        for batch, heroes in (
+            ("0722", []),
+            ("0723", []),
+            ("0725", [{"hero_name": "吉他手卡萝"}]),
+        ):
+            with self.subTest(batch=batch, heroes=heroes):
+                self.assertEqual(
+                    resolve_card_label(
+                        "蓝·摇盒高手",
+                        0,
+                        heroes,
+                        match_batch=batch,
+                    ),
+                    "蓝·摇盒高手",
+                )
 
     def test_sss_defaults_to_normal_without_equipment_context(self) -> None:
         for label in (
+            "我们全都要",
             "一起刷刷刷",
             "蓝·天降啾啾pro",
             "蓝·一起刷刷刷+天降啾啾pro",
         ):
             self.assertEqual(
                 resolve_card_label(label, 0, []),
-                "蓝·一起刷刷刷",
+                "蓝·我们全都要+一起刷刷刷",
             )
         self.assertEqual(
             resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, None),
-            "蓝·一起刷刷刷",
+            "蓝·我们全都要+一起刷刷刷",
         )
         self.assertEqual(
             resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0),
-            "蓝·一起刷刷刷",
+            "蓝·我们全都要+一起刷刷刷",
         )
 
     def test_sss_uses_equipment_instance_count(self) -> None:
         cases = [
-            ([], "蓝·一起刷刷刷"),
-            ([{"equipments": ["火焰啾啾"]}], "蓝·一起刷刷刷"),
+            ([], "蓝·我们全都要+一起刷刷刷"),
+            (
+                [{"equipments": ["火焰啾啾"]}],
+                "蓝·我们全都要+一起刷刷刷",
+            ),
             (
                 [{"equipments": ["火焰啾啾", "寒冰啾啾"]}],
                 "蓝·天降啾啾pro",
@@ -376,6 +429,19 @@ class CardContextRuleTests(unittest.TestCase):
                     resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, heroes),
                     expected,
                 )
+
+    def test_identical_blue_cards_normalize_to_merged_statistics(self) -> None:
+        cases = {
+            "蓝·我们全都要": "蓝·我们全都要+一起刷刷刷",
+            "蓝·一起刷刷刷": "蓝·我们全都要+一起刷刷刷",
+            "蓝·我是老大": "蓝·我是老大+快速成长",
+            "蓝·快速成长": "蓝·我是老大+快速成长",
+            "蓝·专业打手": "蓝·专业打手+冒险",
+            "蓝·冒险": "蓝·专业打手+冒险",
+        }
+        for label, expected in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(resolve_card_label(label, 0, []), expected)
 
     def test_jsb_xj_templates_normalize_to_merged_label(self) -> None:
         self.assertEqual(
@@ -512,9 +578,9 @@ class RockBoxNormalizerTests(unittest.TestCase):
         changes = normalize_ground_truth(data)
         old_card = data["screenshots"]["old.png"]["players"][0]["cards"][0]
         new_card = data["screenshots"]["new.png"]["players"][0]["cards"][0]
-        self.assertEqual(old_card["card_name"], YELLOW_SHAKE_BOX_LABEL)
+        self.assertEqual(old_card["card_name"], YELLOW_DEATH_ROCK_LABEL)
         self.assertEqual(new_card["card_name"], YELLOW_DEATH_ROCK_LABEL)
-        self.assertEqual(sum(changes.values()), 2)
+        self.assertEqual(sum(changes.values()), 1)
 
     def test_sqlite_normalizer_dry_run_uses_hero_name_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -106,6 +106,57 @@ class MetaRecencyTests(unittest.TestCase):
         self.assertGreater(features[2].sample_weight, features[1].sample_weight)
         self.assertGreater(features[1].sample_weight, features[0].sample_weight)
 
+    def test_lookback_filters_by_natural_calendar_days(self) -> None:
+        features = [
+            make_feature(1, 1, "0715"),
+            make_feature(2, 2, "0716"),
+            make_feature(3, 3, "0720"),
+            make_feature(4, 4, "0725"),
+        ]
+        filtered, metadata = MODULE.filter_features_by_lookback(
+            features,
+            10,
+            reference_date=date(2026, 7, 26),
+        )
+        self.assertEqual(
+            [feature.match_batch for feature in filtered],
+            ["0716", "0720", "0725"],
+        )
+        self.assertEqual(metadata["start_batch"], "0716")
+        self.assertEqual(metadata["latest_batch"], "0725")
+        self.assertEqual(metadata["excluded_players"], 1)
+
+    def test_lookback_handles_cross_year_and_missing_batches(self) -> None:
+        features = [
+            make_feature(1, 1, "1223"),
+            make_feature(2, 2, "1224"),
+            make_feature(3, 3, "0102"),
+        ]
+        filtered, metadata = MODULE.filter_features_by_lookback(
+            features,
+            10,
+            reference_date=date(2027, 1, 3),
+        )
+        self.assertEqual(
+            [feature.match_batch for feature in filtered],
+            ["1224", "0102"],
+        )
+        self.assertEqual(metadata["start_batch"], "1224")
+        self.assertEqual(metadata["batch_range"], ["1224", "0102"])
+
+    def test_lookback_excludes_records_without_valid_batch(self) -> None:
+        features = [
+            make_feature(1, 1, "invalid"),
+            make_feature(2, 2, "0725"),
+        ]
+        filtered, metadata = MODULE.filter_features_by_lookback(
+            features,
+            10,
+            reference_date=date(2026, 7, 26),
+        )
+        self.assertEqual([feature.match_batch for feature in filtered], ["0725"])
+        self.assertEqual(metadata["excluded_players"], 1)
+
     def test_old_samples_decay_below_legacy_permanent_floor(self) -> None:
         features = [
             make_feature(1, 1, "0101"),

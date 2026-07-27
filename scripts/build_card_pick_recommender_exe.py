@@ -50,8 +50,10 @@ OCR_HIDDEN_IMPORTS = [
 EXPECTED_ONNX_MODELS = 3
 REQUIRED_SPLIT_CARD_KEYS = frozenset(
     {
-        "蓝·一起刷刷刷",
+        "蓝·我们全都要+一起刷刷刷",
         "蓝·天降啾啾pro",
+        "蓝·我是老大+快速成长",
+        "蓝·专业打手+冒险",
         "蓝·重质也重量pro",
         "蓝·拍档支援",
         "黄·快速成型",
@@ -62,7 +64,17 @@ REQUIRED_SPLIT_CARD_KEYS = frozenset(
         "黄·摇盒高手",
     }
 )
-STALE_SPLIT_RANKING_KEYS = frozenset({"蓝·一起刷刷刷+天降啾啾pro"})
+STALE_SPLIT_RANKING_KEYS = frozenset(
+    {
+        "蓝·一起刷刷刷+天降啾啾pro",
+        "蓝·我们全都要",
+        "蓝·一起刷刷刷",
+        "蓝·我是老大",
+        "蓝·快速成长",
+        "蓝·专业打手",
+        "蓝·冒险",
+    }
+)
 
 
 def build_parser() -> argparse.ArgumentParser:

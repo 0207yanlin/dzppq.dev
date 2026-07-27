@@ -296,7 +296,9 @@ python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 lab
 3. 两者都有 → 数量占优
 4. 数量相同（含都为 0）→ 按本次完整对局库中规则 1–3 明确样本比例，以固定种子可复现分配；无明确样本时回退 1:1
 
-同类先例：蓝卡 `一起刷刷刷` / `天降啾啾pro` 按啾啾装备数拆分。
+同类先例：蓝卡 `我们全都要` / `一起刷刷刷` 先合并为一个统计项，再与
+`天降啾啾pro` 按啾啾装备数拆分（最终阵容中啾啾装备数 `>= 2` 归入 pro）。
+此外，`我是老大` / `快速成长`、`专业打手` / `冒险` 分别使用合并统计。
 
 规则或模板变更后，需对相关批次重新 `predict --write`，必要时跑 `normalize_card_ground_truth.py`，再重建 SQLite；环境分析与桌面推荐器在读库时统一走上述消歧，**不会**把随机分配结果回写 GT。
 
@@ -378,6 +380,7 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--db` | `data/match_latest.db`（缺失时回退最新 `data/matches_*.db`） | 对局 SQLite |
+| `--lookback-days` | `10` | 以最新有效截图批次为终点，分析最近 N 个自然日 |
 | `--balance-notes` | 无 | 平衡性调整笔记文件 |
 | `--min-comp-apps` | `5` | 阵容发现门槛 |
 
@@ -403,7 +406,8 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 推荐器通过界面文字 OCR 匹配逻辑卡名，再从最新 DB（不可用时回退 JSON）读取指标。共享模板按以下方式展示：
 
 - `黄·大力`、`黄·巫术`、`黄·守护` 保留 OCR 识别出的实际卡名，但共同读取 `黄·大力巫术守护` 指标，并标注“共享统计”。
-- SSS、FAST/XXB、QUALITY、JSB/XJ、死亡摇滚/摇盒高手等已能消歧的共享模板，按各自逻辑卡名匹配和统计；catalog 中已有但暂时为零样本的卡显示“暂无统计”。
+- SSS 中 `我们全都要` / `一起刷刷刷` 使用合并统计，并与 `天降啾啾pro` 按啾啾装备数消歧；`我是老大` / `快速成长`、`专业打手` / `冒险` 也分别使用合并统计。推荐器保留 OCR 识别出的实际卡名并标注“共享统计”。
+- FAST/XXB、QUALITY、JSB/XJ、死亡摇滚/摇盒高手等可消歧共享模板按各自逻辑卡名匹配和统计；catalog 中已有但暂时为零样本的卡显示“暂无统计”。
 - `开赞` / `蓝·开赞` / `开攒` 仅在推荐器查询层纠正为 `蓝·开攒大亨`，不会改写统计 canonical 数据；`天降啾啾` 可查询 `蓝·天降啾啾pro`。
 
 发布 EXE 必须 clean rebuild，禁止复用旧 `dist` 数据。先刷新 `data/match_latest.db` 与
@@ -413,7 +417,8 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 python scripts/build_card_pick_recommender_exe.py --clean
 ```
 
-构建脚本会在复制后校验外层 `dist/.../data` 与源数据逐字节一致，并检查 JSON 中共享模板拆分后的逻辑键完整、无旧 SSS 合并排行键；校验失败不会形成可发布构建。
+构建脚本会在复制后校验外层 `dist/.../data` 与源数据逐字节一致，并检查 JSON
+中共享模板拆分/合并后的逻辑键完整、无旧单卡或旧 SSS 排行键；校验失败不会形成可发布构建。
 
 ---
 

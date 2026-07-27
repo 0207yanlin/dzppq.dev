@@ -106,8 +106,10 @@ def _merged_card_stats() -> CardStatsIndex:
     base_keys = {
         "蓝": [
             "蓝·拍档支援",
-            "蓝·一起刷刷刷",
+            "蓝·我们全都要+一起刷刷刷",
             "蓝·天降啾啾pro",
+            "蓝·我是老大+快速成长",
+            "蓝·专业打手+冒险",
             "蓝·开攒大亨",
             "蓝·福袋有钱",
             "蓝·波纹利己",
@@ -278,6 +280,12 @@ MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
     ("蓝", "蓝·最强支援", "蓝·拍档支援"),
     ("蓝", "一起刷刷刷", "蓝·一起刷刷刷"),
     ("蓝", "蓝·一起刷刷刷", "蓝·一起刷刷刷"),
+    ("蓝", "我们全都要", "蓝·我们全都要"),
+    ("蓝", "蓝·我们全都要", "蓝·我们全都要"),
+    ("蓝", "我是老大", "蓝·我是老大"),
+    ("蓝", "快速成长", "蓝·快速成长"),
+    ("蓝", "专业打手", "蓝·专业打手"),
+    ("蓝", "冒险", "蓝·冒险"),
     ("蓝", "天降啾啾pro", "蓝·天降啾啾pro"),
     ("蓝", "蓝·天降啾啾pro", "蓝·天降啾啾pro"),
     ("蓝", "天降啾啾", "蓝·天降啾啾pro"),
@@ -648,13 +656,35 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     assert blue_clone.team_avg_rank is not None
     assert blue_clone.team_top2_rate is not None
 
-    normal_sss = stats.get_metrics("蓝·一起刷刷刷", "蓝")
+    normal_sss = stats.get_metrics("蓝·我们全都要+一起刷刷刷", "蓝")
     pro_sss = stats.get_metrics("蓝·天降啾啾pro", "蓝")
     assert normal_sss is not None
     assert pro_sss is not None
     assert normal_sss.appearances == 1
     assert pro_sss.appearances == 1
     assert stats.get_metrics("蓝·一起刷刷刷+天降啾啾pro", "蓝") is None
+
+
+@pytest.mark.parametrize(
+    ("actual_name", "merged_name"),
+    [
+        ("蓝·我们全都要", "蓝·我们全都要+一起刷刷刷"),
+        ("蓝·一起刷刷刷", "蓝·我们全都要+一起刷刷刷"),
+        ("蓝·我是老大", "蓝·我是老大+快速成长"),
+        ("蓝·快速成长", "蓝·我是老大+快速成长"),
+        ("蓝·专业打手", "蓝·专业打手+冒险"),
+        ("蓝·冒险", "蓝·专业打手+冒险"),
+    ],
+)
+def test_exe_actual_blue_names_use_merged_statistics(
+    actual_name: str, merged_name: str
+) -> None:
+    stats = _merged_card_stats()
+    actual = stats.get_metrics(actual_name, "蓝")
+    merged = stats.get_metrics(merged_name, "蓝")
+    assert actual is merged
+    assert actual is not None
+    assert actual.appearances == 50
 
 
 def _build_jsb_xj_stats_db(tmp_path: Path) -> Path:

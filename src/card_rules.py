@@ -21,9 +21,19 @@ FAST_XXB_LABEL = "黄·快速成型"
 MANA_FOCUS_LABEL = "白·法力专注"
 KZDH_LABEL = "蓝·开攒大亨"
 SSS_LABEL = "蓝·一起刷刷刷+天降啾啾pro"
-SSS_NORMAL_LABEL = "蓝·一起刷刷刷"
+SSS_NORMAL_LABEL = "蓝·我们全都要+一起刷刷刷"
 SSS_PRO_LABEL = "蓝·天降啾啾pro"
-SSS_GROUP = frozenset({"一起刷刷刷", "天降啾啾pro", "一起刷刷刷+天降啾啾pro"})
+SSS_GROUP = frozenset(
+    {
+        "我们全都要",
+        "一起刷刷刷",
+        "我们全都要+一起刷刷刷",
+        "天降啾啾pro",
+        "一起刷刷刷+天降啾啾pro",
+    }
+)
+GROWTH_BOSS_LABEL = "蓝·我是老大+快速成长"
+PRO_ADVENTURE_LABEL = "蓝·专业打手+冒险"
 BOYL_LABEL = "蓝·波纹利己"
 FDYQ_LABEL = "蓝·福袋有钱"
 YELLOW_GONGMING_LABEL = "黄·装备共鸣"
@@ -51,8 +61,13 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "拍档支援": QUALITY_PARTNER_SUPPORT_LABEL,
     "最佳拍档": "拍档支援",
     "最强支援": "拍档支援",
+    "我们全都要": SSS_NORMAL_LABEL,
     "一起刷刷刷": SSS_NORMAL_LABEL,
     "天降啾啾pro": SSS_PRO_LABEL,
+    "我是老大": GROWTH_BOSS_LABEL,
+    "快速成长": GROWTH_BOSS_LABEL,
+    "专业打手": PRO_ADVENTURE_LABEL,
+    "冒险": PRO_ADVENTURE_LABEL,
     "开攒": "开攒大亨",
     "大亨": "开攒大亨",
     "福袋": "福袋有钱",
@@ -76,8 +91,13 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "蓝·最强支援": QUALITY_PARTNER_SUPPORT_LABEL,
     "蓝·开攒": KZDH_LABEL,
     "蓝·大亨": KZDH_LABEL,
+    "蓝·我们全都要": SSS_NORMAL_LABEL,
     "蓝·一起刷刷刷": SSS_NORMAL_LABEL,
     "蓝·天降啾啾pro": SSS_PRO_LABEL,
+    "蓝·我是老大": GROWTH_BOSS_LABEL,
+    "蓝·快速成长": GROWTH_BOSS_LABEL,
+    "蓝·专业打手": PRO_ADVENTURE_LABEL,
+    "蓝·冒险": PRO_ADVENTURE_LABEL,
     "蓝·福袋": FDYQ_LABEL,
     "蓝·有钱同享": FDYQ_LABEL,
     "蓝·利己主义": BOYL_LABEL,
@@ -217,7 +237,7 @@ def resolve_card_label(
         if jiujiu_count >= 2:
             return SSS_PRO_LABEL
         return SSS_NORMAL_LABEL
-    if body in YELLOW_DEATH_ROCK_SHAKE_BOX_GROUP:
+    if label == YELLOW_SHAKE_BOX_LABEL:
         batch = card_rule_batch(match_path, match_batch)
         if batch is None:
             return label

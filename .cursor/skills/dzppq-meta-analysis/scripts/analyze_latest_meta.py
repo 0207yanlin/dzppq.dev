@@ -90,6 +90,7 @@ FOOD_HARVEST_PREFIXES = ("美味", "绝味", "暗黑")
 SPECIAL_EQUIPMENT_RELIABLE_MIN = 8
 SPECIAL_EQUIPMENT_WEARER_MIN = 3
 DEFAULT_RECENCY_HALF_LIFE_DAYS = 2.0
+DEFAULT_LOOKBACK_DAYS = 10
 MIN_RECENCY_WEIGHT = 0.0
 TREND_RECENT_BATCHES = 2
 TREND_PRIOR_BATCHES = 2
@@ -144,7 +145,10 @@ CARD_TEMPLATE_DIR = ROOT / "assets" / "templates" / "cards"
 MERGED_TEMPLATE_EXPANSIONS: dict[str, list[str]] = {
     "黄·吸吸宝pro快速成型": ["黄·快速成型", "黄·吸吸宝pro"],
     "蓝·重质拍档支援": ["蓝·拍档支援", "蓝·重质也重量pro"],
-    "蓝·一起刷刷刷+天降啾啾pro": ["蓝·一起刷刷刷", "蓝·天降啾啾pro"],
+    "蓝·一起刷刷刷+天降啾啾pro": [
+        "蓝·我们全都要+一起刷刷刷",
+        "蓝·天降啾啾pro",
+    ],
     "黄·巨神兵+迅迅迅捷双剑": ["黄·巨神兵", "黄·迅迅迅捷双剑"],
     "黄·摇盒高手": ["黄·死亡摇滚", "黄·摇盒高手"],
 }
@@ -165,8 +169,12 @@ CARD_MERGE_NOTES: dict[str, str] = {
         "福袋，有钱同享 -> 福袋有钱；"
         "最佳拍档，最强支援 -> 拍档支援；"
         "最后的波纹，利己主义 -> 波纹利己；"
-        "开攒，大亨 -> 开攒大亨。"
-        "一起刷刷刷与天降啾啾pro虽共用图标，已按最终阵容啾啾装备数量分别统计。"
+        "开攒，大亨 -> 开攒大亨；"
+        "我们全都要，一起刷刷刷 -> 我们全都要+一起刷刷刷；"
+        "我是老大，快速成长 -> 我是老大+快速成长；"
+        "专业打手，冒险 -> 专业打手+冒险。"
+        "我们全都要/一起刷刷刷与天降啾啾pro虽共用图标，"
+        "仍按最终阵容啾啾装备数量分别统计。"
     ),
     "彩": (
         "以下卡牌因图标完全相同做了合并处理："
@@ -336,6 +344,57 @@ def ordered_batches(
 ) -> list[str]:
     batches = {feature.match_batch for feature in features if feature.match_batch}
     return sorted(batches, key=lambda batch: batch_ordinal(batch, reference_date))
+
+
+def filter_features_by_lookback(
+    features: list[PlayerFeature],
+    lookback_days: int,
+    *,
+    reference_date: date | None = None,
+) -> tuple[list[PlayerFeature], dict[str, Any]]:
+    """Keep natural calendar days ending at the latest valid screenshot batch."""
+    if lookback_days < 1:
+        raise ValueError("lookback_days must be >= 1")
+
+    dated_batches = [
+        (batch, inferred)
+        for batch in ordered_batches(features, reference_date)
+        if (inferred := infer_batch_date(batch, reference_date)) is not None
+    ]
+    if not dated_batches:
+        return [], {
+            "lookback_days": lookback_days,
+            "latest_batch": None,
+            "start_batch": None,
+            "batch_range": [],
+            "source_players": len(features),
+            "included_players": 0,
+            "excluded_players": len(features),
+        }
+
+    latest_batch, latest_date = max(dated_batches, key=lambda item: item[1])
+    start_date = latest_date - timedelta(days=lookback_days - 1)
+    filtered = [
+        feature
+        for feature in features
+        if (
+            (batch_date := infer_batch_date(feature.match_batch, reference_date))
+            is not None
+            and start_date <= batch_date <= latest_date
+        )
+    ]
+    batches = ordered_batches(filtered, reference_date)
+    return filtered, {
+        "lookback_days": lookback_days,
+        "latest_batch": latest_batch,
+        "start_batch": start_date.strftime("%m%d"),
+        "start_date": start_date.isoformat(),
+        "end_date": latest_date.isoformat(),
+        "batch_range": [batches[0], batches[-1]] if batches else [],
+        "source_players": len(features),
+        "included_players": len(filtered),
+        "excluded_players": len(features) - len(filtered),
+    }
 
 
 def compute_sample_weights(
@@ -1130,34 +1189,91 @@ def db_count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def data_quality(conn: sqlite3.Connection, bot_ids: set[int]) -> dict[str, Any]:
-    unknown_heroes = conn.execute(
-        "SELECT COUNT(*) FROM heroes WHERE hero_name = 'unknown'"
-    ).fetchone()[0]
-    unknown_cards = conn.execute(
-        "SELECT COUNT(*) FROM cards WHERE card_name = 'unknown'"
-    ).fetchone()[0]
-    unknown_equipment = conn.execute(
-        "SELECT COUNT(*) FROM hero_equipments WHERE equipment_name = 'unknown'"
-    ).fetchone()[0]
-    card_granted_heroes = conn.execute(
-        "SELECT COUNT(*) FROM heroes WHERE hero_name IN ({})".format(
-            ",".join("?" for _ in CARD_GRANTED_HEROES)
+def data_quality(
+    conn: sqlite3.Connection,
+    bot_ids: set[int],
+    match_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    match_filter = ""
+    match_params: tuple[Any, ...] = ()
+    if match_ids is not None:
+        match_filter = " WHERE m.id IN ({})".format(
+            ",".join("?" for _ in match_ids) or "NULL"
+        )
+        match_params = tuple(sorted(match_ids))
+
+    def count_joined(from_sql: str, condition: str | None = None) -> int:
+        where = match_filter
+        if condition:
+            where += (" AND " if where else " WHERE ") + condition
+        return int(
+            conn.execute(
+                f"SELECT COUNT(*) {from_sql}{where}",
+                match_params,
+            ).fetchone()[0]
+        )
+
+    matches = count_joined("FROM matches m")
+    players = count_joined("FROM players p JOIN matches m ON m.id = p.match_id")
+    heroes = count_joined(
+        "FROM heroes h JOIN players p ON p.id = h.player_id "
+        "JOIN matches m ON m.id = p.match_id"
+    )
+    hero_equipments = count_joined(
+        "FROM hero_equipments he JOIN heroes h ON h.id = he.hero_id "
+        "JOIN players p ON p.id = h.player_id JOIN matches m ON m.id = p.match_id"
+    )
+    cards = count_joined(
+        "FROM cards c JOIN players p ON p.id = c.player_id "
+        "JOIN matches m ON m.id = p.match_id"
+    )
+    unknown_heroes = count_joined(
+        "FROM heroes h JOIN players p ON p.id = h.player_id "
+        "JOIN matches m ON m.id = p.match_id",
+        "h.hero_name = 'unknown'",
+    )
+    unknown_cards = count_joined(
+        "FROM cards c JOIN players p ON p.id = c.player_id "
+        "JOIN matches m ON m.id = p.match_id",
+        "c.card_name = 'unknown'",
+    )
+    unknown_equipment = count_joined(
+        "FROM hero_equipments he JOIN heroes h ON h.id = he.hero_id "
+        "JOIN players p ON p.id = h.player_id JOIN matches m ON m.id = p.match_id",
+        "he.equipment_name = 'unknown'",
+    )
+    card_granted_heroes = count_joined(
+        "FROM heroes h JOIN players p ON p.id = h.player_id "
+        "JOIN matches m ON m.id = p.match_id",
+        "h.hero_name IN ({})".format(
+            ",".join(f"'{name}'" for name in sorted(CARD_GRANTED_HEROES))
         ),
-        tuple(CARD_GRANTED_HEROES),
-    ).fetchone()[0]
+    )
+    if match_ids is None:
+        window_bot_ids = bot_ids
+    else:
+        player_ids = {
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM players WHERE match_id IN ({})".format(
+                    ",".join("?" for _ in match_ids) or "NULL"
+                ),
+                tuple(sorted(match_ids)),
+            )
+        }
+        window_bot_ids = bot_ids & player_ids
     return {
-        "matches": db_count(conn, "matches"),
-        "players": db_count(conn, "players"),
-        "heroes": db_count(conn, "heroes"),
-        "hero_equipments": db_count(conn, "hero_equipments"),
-        "cards": db_count(conn, "cards"),
+        "matches": matches,
+        "players": players,
+        "heroes": heroes,
+        "hero_equipments": hero_equipments,
+        "cards": cards,
         "unknown_heroes": int(unknown_heroes),
         "unknown_cards": int(unknown_cards),
         "unknown_equipment": int(unknown_equipment),
         "card_granted_heroes": int(card_granted_heroes),
-        "bot_player_records_excluded": len(bot_ids),
-        "seven_eight_bot_matches": len(bot_ids) // 2,
+        "bot_player_records_excluded": len(window_bot_ids),
+        "seven_eight_bot_matches": len(window_bot_ids) // 2,
     }
 
 
@@ -4558,11 +4674,22 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
     try:
         dict_character, dict_bond = load_game_config()
         bot_ids = find_bot_player_ids(conn)
-        quality = data_quality(conn, bot_ids)
         validation = validate_config(conn, dict_character, dict_bond)
-        features = load_player_features(conn, bot_ids, dict_character, dict_bond)
-        if not features:
+        all_features = load_player_features(conn, bot_ids, dict_character, dict_bond)
+        if not all_features:
             raise SystemExit("No usable player records after filtering.")
+        lookback_days = getattr(args, "lookback_days", DEFAULT_LOOKBACK_DAYS)
+        features, analysis_window = filter_features_by_lookback(
+            all_features,
+            lookback_days,
+        )
+        if not features:
+            raise SystemExit("No usable player records in the analysis lookback window.")
+        quality = data_quality(
+            conn,
+            bot_ids,
+            {feature.match_id for feature in features},
+        )
         half_life = getattr(args, "recency_half_life_days", DEFAULT_RECENCY_HALF_LIFE_DAYS)
         compute_sample_weights(features, half_life_days=half_life)
         total_weight = sum(feature.sample_weight for feature in features) or 1.0
@@ -4682,6 +4809,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                     "batch_range": recency["batch_range"],
                     "note": "批次日期来自 path 中的 screenshots.MMDD；均分/胜率/前四率按加权样本计算，样本阈值仍看原始 n。",
                 },
+                "analysis_window": analysis_window,
                 "version_tracking": {
                     **trend_methodology,
                     "balance_boundary": balance_boundary,
@@ -4696,6 +4824,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
             "overview": {
                 "quality": quality,
                 "filtered_players": len(features),
+                "analysis_window": analysis_window,
                 "effective_sample_weight": recency["effective_sample_weight"],
                 "recency": recency,
                 "version_tracking": {
@@ -5238,6 +5367,7 @@ def render_md(data: dict[str, Any]) -> str:
     lines.append("")
 
     quality = data["overview"]["quality"]
+    analysis_window = data["overview"].get("analysis_window", {})
     lines.append("## 数据概览与过滤摘要")
     lines.append("")
     lines.append("| 指标 | 数值 |")
@@ -5257,6 +5387,16 @@ def render_md(data: dict[str, Any]) -> str:
     ):
         lines.append(f"| {key} | {quality[key]} |")
     lines.append(f"| filtered_players | {data['overview']['filtered_players']} |")
+    if analysis_window:
+        lines.append(f"| lookback_days | {analysis_window.get('lookback_days', '—')} |")
+        lines.append(
+            f"| analysis_window | {analysis_window.get('start_batch', '—')} → "
+            f"{analysis_window.get('latest_batch', '—')} |"
+        )
+        lines.append(
+            f"| players_excluded_by_window | "
+            f"{analysis_window.get('excluded_players', '—')} |"
+        )
     recency = data["overview"].get("recency", {})
     if recency:
         lines.append(f"| effective_sample_weight | {data['overview'].get('effective_sample_weight', '—')} |")
@@ -7739,8 +7879,16 @@ def interactive_dashboard_css() -> str:
 def render_interactive_html(data: dict[str, Any]) -> str:
     quality = data["overview"]["quality"]
     generated = esc(data["generated_at"].split("T")[0])
+    analysis_window = data["overview"].get("analysis_window", {})
+    window_label = ""
+    if analysis_window:
+        window_label = (
+            f" · 分析窗口 {esc(str(analysis_window.get('start_batch', '—')))}"
+            f"–{esc(str(analysis_window.get('latest_batch', '—')))}"
+        )
     subtitle = (
-        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录"
+        f"{window_label} · {generated}"
     )
     panels = render_html_panels(data)
     tab_buttons = "".join(
@@ -8193,6 +8341,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RECENCY_HALF_LIFE_DAYS,
         help="Half-life in days for batch recency weighting",
     )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=DEFAULT_LOOKBACK_DAYS,
+        help="Analyze natural calendar days ending at the latest batch (default: 10)",
+    )
     parser.add_argument("--min-comp-apps", type=int, default=5)
     parser.add_argument("--min-entity-apps", type=int, default=10)
     parser.add_argument("--min-card-apps", type=int, default=12)
@@ -8205,6 +8359,8 @@ def resolve_output_path(path: Path) -> Path:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.lookback_days < 1:
+        raise SystemExit("--lookback-days must be >= 1")
     data = build_analysis(args)
     json_path = resolve_output_path(args.json)
     md_path = resolve_output_path(args.md)

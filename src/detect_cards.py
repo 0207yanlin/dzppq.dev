@@ -94,6 +94,12 @@ VISUAL_CARD_GROUPS: tuple[dict[str, Any], ...] = (
         "labels": frozenset({"白·打手", "蓝·打手"}),
         "strategies": ("shape_family_color_rescue",),
     },
+    {
+        "labels": frozenset(
+            {"白·百花齐放", "黄·百花齐放pro", "彩·百花齐放max"}
+        ),
+        "strategies": ("shape_family_color_rescue",),
+    },
 )
 
 _LABEL_TO_GROUP: dict[str, dict[str, Any]] = {}

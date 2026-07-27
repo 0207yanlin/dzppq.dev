@@ -55,7 +55,7 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Mature-stage stats drive ranking and detail performance; transition-stage failures contribute to formation difficulty only. Render mature/transition inversion diagnostics when a higher-tier stage is rejected for worse performance.
 - Do not emit separate `高费大成上限` / `高费大成上限观察` recommendation keys or report sections. High-cost 3-star dependency still caps normal star advice at 2 stars and shows a cost-risk note on the affected high-cost comps.
 - Version trend labels (`上升` / `稳定` / `下滑`) compare recent vs prior batch windows; insufficient samples must not force a trend call.
-- Blue cards `蓝·一起刷刷刷` and `蓝·天降啾啾pro` share an icon but are disambiguated by final-board jiujiu equipment count (`>= 2` -> pro); never report them as one merged card statistic.
+- Blue cards `蓝·我们全都要`, `蓝·一起刷刷刷`, and `蓝·天降啾啾pro` share an icon. Merge the first two as `蓝·我们全都要+一起刷刷刷`; use final-board jiujiu equipment count to disambiguate that merged normal statistic from pro (`>= 2` -> pro). Also merge `蓝·我是老大` / `蓝·快速成长` as `蓝·我是老大+快速成长`, and `蓝·专业打手` / `蓝·冒险` as `蓝·专业打手+冒险`.
 - Yellow cards `黄·巨神兵` and `黄·迅迅迅捷双剑` share an icon but are disambiguated by final-board equipment counts of `巨神兵之斧` / `迅捷双剑` (axe-only -> 巨神兵, sword-only -> 迅迅迅捷双剑, both present -> majority); equal counts (including both zero) are assigned from the clear-sample ratio of the current database with a fixed seed. Never report them as one merged card statistic.
 - Yellow cards `黄·死亡摇滚` and `黄·摇盒高手` share the single `黄·摇盒高手` template and must be separate ranking keys. The rule starts at batch `screenshots.0723`: final boards containing `吉他手卡萝` resolve to `黄·死亡摇滚`, boards without her resolve to `黄·摇盒高手`; every earlier batch resolves to `黄·摇盒高手`. Pass each match `path` and parsed `batch` into the shared card-label resolver.
 - Do not recommend 3-star 4-cost or 5-cost carries as a normal requirement.
@@ -64,6 +64,7 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Count cross-strategy contest pressure when strategies need the same 3-star main carry, even if their final bonds differ.
 - Treat weak lower-tier bond rows covered by a strong mature strategy as formation pressure, not standalone version traps.
 - Evaluate jiujiu only when it contributes as a final main/sub bond, specific hero boost, or cross-strategy generalist value.
+- Analyze only the latest 10 natural calendar days ending at the newest valid `screenshots.MMDD` batch by default; keep older matches in the database but exclude them from report statistics.
 - Weight recent batches more heavily using `screenshots.MMDD` from `matches.path`; keep raw sample counts for confidence thresholds.
 
 ## Output Expectations

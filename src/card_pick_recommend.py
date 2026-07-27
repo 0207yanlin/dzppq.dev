@@ -17,7 +17,9 @@ from src.card_rules import (
     CARD_TYPE_PREFIXES,
     FAST_XXB_LABEL,
     FAST_XXB_PRO_LABEL,
+    GROWTH_BOSS_LABEL,
     KZDH_LABEL,
+    PRO_ADVENTURE_LABEL,
     QUALITY_PARTNER_SUPPORT_LABEL,
     QUALITY_WEIGHT_PRO_LABEL,
     SSS_NORMAL_LABEL,
@@ -45,6 +47,12 @@ OCR_EXACT_QUERY_ALIASES: dict[str, str] = {
     "蓝·天降啾啾": SSS_PRO_LABEL,
 }
 SHARED_STATS_LOOKUPS: dict[str, str] = {
+    "蓝·我们全都要": SSS_NORMAL_LABEL,
+    "蓝·一起刷刷刷": SSS_NORMAL_LABEL,
+    "蓝·我是老大": GROWTH_BOSS_LABEL,
+    "蓝·快速成长": GROWTH_BOSS_LABEL,
+    "蓝·专业打手": PRO_ADVENTURE_LABEL,
+    "蓝·冒险": PRO_ADVENTURE_LABEL,
     "黄·大力": YELLOW_DLS_LABEL,
     "黄·巫术": YELLOW_DLS_LABEL,
     "黄·守护": YELLOW_DLS_LABEL,
