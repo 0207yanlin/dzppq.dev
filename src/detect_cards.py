@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection, Literal
 
 import cv2
 import numpy as np
@@ -32,6 +32,18 @@ DETECTION_PARAMS = {
     "min_gap": 0.08,
     "padding": 4,
     "margin_ratio": 0.12,
+}
+
+# Conservative, tri-state card-slot presence thresholds.  These intentionally
+# leave a broad uncertain band so a UI background is not confidently treated
+# as either a card or an empty slot.  Keep them centralized for calibration.
+CARD_PRESENCE_PARAMS = {
+    "empty_max_foreground_ratio": 0.035,
+    "empty_max_gray_variance": 20.0,
+    "empty_max_template_score": 0.35,
+    "occupied_min_foreground_ratio": 0.08,
+    "occupied_min_gray_variance": 120.0,
+    "occupied_min_template_score": 0.60,
 }
 
 SHAPE_WEIGHT = 0.55
@@ -89,6 +101,7 @@ VISUAL_CARD_GROUPS: tuple[dict[str, Any], ...] = (
     {
         "labels": frozenset({"白·蛋仔变变变", "彩·装备变变变"}),
         "strategies": ("shape_family_color_rescue",),
+        "min_color_lead": 0.02,
     },
     {
         "labels": frozenset({"白·打手", "蓝·打手"}),
@@ -322,6 +335,7 @@ def _match_debug_base(
         "min_gap": min_gap,
         "gap_threshold": min_gap,
         "reject_reason": reject_reason,
+        "top_candidates": [],
     }
 
 
@@ -340,8 +354,12 @@ def _winner_debug(
     gap = top1_score - top2_score
     debug: dict[str, Any] = {
         "top1_label": _detail_label(winner),
+        "top1_raw_asset_stem": Path(str(winner["name"])).stem,
         "top1_score": top1_score,
         "top2_label": _detail_label(second) if second is not None else None,
+        "top2_raw_asset_stem": (
+            Path(str(second["name"])).stem if second is not None else None
+        ),
         "top2_score": top2_score,
         "gap": gap,
         "threshold": threshold,
@@ -365,6 +383,20 @@ class CardMatchDecision:
     label: str | None
     score: float
     debug: dict[str, Any] = field(default_factory=dict)
+
+
+CardPresence = Literal["occupied", "empty", "uncertain"]
+
+
+@dataclass
+class CardDetectionResult:
+    """One card ROI result, including diagnostics from its single template scan."""
+
+    label: str
+    score: float
+    presence: CardPresence
+    debug: dict[str, Any] = field(default_factory=dict)
+    candidates: tuple[dict[str, Any], ...] = ()
 
 
 def build_match_details(
@@ -392,16 +424,9 @@ def build_match_details(
             margin_ratio,
             tmpl_chroma=sig.get("chroma"),
         )
-        combined = combined_score(
-            roi_icon,
-            sig["icon"],
-            roi_fg,
-            sig["fg"],
-            padding,
-            margin_ratio,
-            tmpl_shape_gray=sig.get("shape_gray"),
-            tmpl_chroma=sig.get("chroma"),
-        )
+        # Do not call combined_score here: shape/color/chroma were already
+        # computed above and are the complete scan of this template.
+        combined = SHAPE_WEIGHT * shape + COLOR_WEIGHT * color + CHROMA_WEIGHT * chroma
         details.append(
             {
                 "name": name,
@@ -413,6 +438,56 @@ def build_match_details(
         )
     details.sort(key=lambda item: item["combined"], reverse=True)
     return details
+
+
+def _candidate_debug(details: list[dict], limit: int = 5) -> list[dict[str, Any]]:
+    """Preserve raw asset identity alongside normalized labels."""
+    return [
+        {
+            "raw_asset_name": str(item["name"]),
+            "raw_asset_stem": Path(str(item["name"])).stem,
+            "label": _detail_label(item),
+            "score": float(item["combined"]),
+            "shape": float(item["shape"]),
+            "color": float(item["color"]),
+            "chroma": float(item.get("chroma", 0.0)),
+        }
+        for item in details[:limit]
+    ]
+
+
+def classify_card_presence(
+    roi_bgr: np.ndarray,
+    roi_fg: np.ndarray,
+    best_template_score: float,
+    params: dict[str, float] | None = None,
+) -> tuple[CardPresence, dict[str, float]]:
+    """Conservatively classify a summary card slot using scan-adjacent signals."""
+    thresholds = params or CARD_PRESENCE_PARAMS
+    foreground_ratio = float(np.count_nonzero(roi_fg) / roi_fg.size) if roi_fg.size else 0.0
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    gray_variance = float(np.var(gray))
+    signals = {
+        "foreground_ratio": foreground_ratio,
+        "gray_variance": gray_variance,
+        "best_template_score": float(best_template_score),
+    }
+
+    if (
+        foreground_ratio <= thresholds["empty_max_foreground_ratio"]
+        and gray_variance <= thresholds["empty_max_gray_variance"]
+        and best_template_score <= thresholds["empty_max_template_score"]
+    ):
+        return "empty", signals
+    if (
+        best_template_score >= thresholds["occupied_min_template_score"]
+        or (
+            foreground_ratio >= thresholds["occupied_min_foreground_ratio"]
+            and gray_variance >= thresholds["occupied_min_gray_variance"]
+        )
+    ):
+        return "occupied", signals
+    return "uncertain", signals
 
 
 def _try_shape_cluster_color(
@@ -457,7 +532,8 @@ def _try_shape_family_color_rescue(
     winner = color_ranked[0]
     second = color_ranked[1]
 
-    if winner["color"] - second["color"] < 0.03:
+    min_color_lead = float(group.get("min_color_lead", 0.03))
+    if winner["color"] - second["color"] < min_color_lead:
         return None
 
     allow_near = bool(group.get("allow_near_threshold"))
@@ -613,15 +689,17 @@ def select_card_match(
     return CardMatchDecision(label, score, debug)
 
 
-def diagnose_card_match(crop: np.ndarray, template_sigs: dict) -> dict[str, Any]:
-    """Score a crop against templates and return full match diagnostics."""
-    params = DETECTION_PARAMS
-    threshold = float(params["threshold"])
-    min_gap = float(params["min_gap"])
-    padding = int(params["padding"])
-    margin_ratio = float(params["margin_ratio"])
-
-    roi_icon, roi_fg = prepare_card_icon(crop)
+def match_card_roi_detailed(
+    roi_bgr: np.ndarray,
+    template_sigs: dict,
+    threshold: float = DETECTION_PARAMS["threshold"],
+    min_gap: float = DETECTION_PARAMS["min_gap"],
+    padding: int = DETECTION_PARAMS["padding"],
+    margin_ratio: float = DETECTION_PARAMS["margin_ratio"],
+    presence_params: dict[str, float] | None = None,
+) -> CardDetectionResult:
+    """Return label, diagnostics, candidates and presence from one template scan."""
+    roi_icon, roi_fg = prepare_card_icon(roi_bgr)
     details = build_match_details(
         roi_icon,
         roi_fg,
@@ -629,7 +707,37 @@ def diagnose_card_match(crop: np.ndarray, template_sigs: dict) -> dict[str, Any]
         padding=padding,
         margin_ratio=margin_ratio,
     )
-    return select_card_match(details, threshold=threshold, min_gap=min_gap).debug
+    # Own the ranking contract here instead of relying on the scanner's return
+    # order; callers/tests may supply details assembled in template insertion
+    # order.
+    ranked_details = sorted(
+        details, key=lambda item: float(item["combined"]), reverse=True
+    )
+    decision = select_card_match(
+        ranked_details, threshold=threshold, min_gap=min_gap
+    )
+    best_score = (
+        float(ranked_details[0]["combined"]) if ranked_details else 0.0
+    )
+    presence, signals = classify_card_presence(
+        roi_bgr, roi_fg, best_score, params=presence_params
+    )
+    debug = dict(decision.debug)
+    debug["top_candidates"] = _candidate_debug(ranked_details)
+    debug["presence"] = presence
+    debug["presence_signals"] = signals
+    return CardDetectionResult(
+        label=decision.label or UNKNOWN,
+        score=decision.score,
+        presence=presence,
+        debug=debug,
+        candidates=tuple(ranked_details),
+    )
+
+
+def diagnose_card_match(crop: np.ndarray, template_sigs: dict) -> dict[str, Any]:
+    """Compatibility diagnostic wrapper; performs exactly one template scan."""
+    return match_card_roi_detailed(crop, template_sigs).debug
 
 
 def match_card_roi(
@@ -640,25 +748,43 @@ def match_card_roi(
     padding: int = DETECTION_PARAMS["padding"],
     margin_ratio: float = DETECTION_PARAMS["margin_ratio"],
 ) -> tuple[str, float]:
-    roi_icon, roi_fg = prepare_card_icon(roi_bgr)
-    details = build_match_details(
-        roi_icon,
-        roi_fg,
+    result = match_card_roi_detailed(
+        roi_bgr,
         template_sigs,
+        threshold=threshold,
+        min_gap=min_gap,
         padding=padding,
         margin_ratio=margin_ratio,
     )
-    decision = select_card_match(details, threshold=threshold, min_gap=min_gap)
-    if decision.label is None:
-        return UNKNOWN, decision.score
-    return decision.label, decision.score
+    return result.label, result.score
 
 
-def detect_cards(
+def should_confirm_card_detail(
+    result: CardDetectionResult,
+    workbook_raw_stems: Collection[str],
+) -> bool:
+    """Confirm details only for occupied slots mapped by workbook raw stem.
+
+    Confidence, gap, normalized labels and Python visual groups deliberately do
+    not affect this decision; the caller-provided workbook is the sole mapping
+    authority.  Empty and uncertain slots are never clicked.
+    """
+    if result.presence != "occupied":
+        return False
+
+    mapped_stems = {Path(str(stem)).stem for stem in workbook_raw_stems}
+    winner_stem = result.debug.get("top1_raw_asset_stem")
+    return bool(
+        winner_stem is not None
+        and Path(str(winner_stem)).stem in mapped_stems
+    )
+
+
+def detect_cards_detailed(
     img: np.ndarray,
     template_sigs: dict | None = None,
 ) -> list[dict]:
-    """Detect cards for all players."""
+    """Detect all summary card slots and retain single-pass diagnostics."""
     if template_sigs is None:
         template_sigs = load_template_sigs()
 
@@ -671,7 +797,7 @@ def detect_cards(
             roi = crop_roi(img, box)
             if not roi_valid(roi, box):
                 continue
-            label, score = match_card_roi(
+            match = match_card_roi_detailed(
                 roi,
                 template_sigs,
                 threshold=params["threshold"],
@@ -682,8 +808,11 @@ def detect_cards(
             cards.append(
                 {
                     "slot_index": slot,
-                    "label": label,
-                    "score": score,
+                    "label": match.label,
+                    "score": match.score,
+                    "presence": match.presence,
+                    "debug": match.debug,
+                    "match": match,
                 }
             )
         results.append(
@@ -694,3 +823,26 @@ def detect_cards(
             }
         )
     return results
+
+
+def detect_cards(
+    img: np.ndarray,
+    template_sigs: dict | None = None,
+) -> list[dict]:
+    """Detect cards for all players using the legacy output schema."""
+    detailed_rows = detect_cards_detailed(img, template_sigs)
+    return [
+        {
+            "player": row["player"],
+            "row_index": row["row_index"],
+            "cards": [
+                {
+                    "slot_index": card["slot_index"],
+                    "label": card["label"],
+                    "score": card["score"],
+                }
+                for card in row["cards"]
+            ],
+        }
+        for row in detailed_rows
+    ]

@@ -179,6 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Parallel workers for label prediction prefetch (default: {DEFAULT_WORKERS})",
     )
     parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"Target SQLite database (default: {DEFAULT_DB_PATH})",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned commands without executing them",
@@ -192,7 +198,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--workers must be >= 1")
     batch = args.batch if args.batch is not None else default_batch_mmdd()
     try:
-        process_batch(batch=batch, workers=args.workers, dry_run=args.dry_run)
+        process_batch(
+            batch=batch,
+            workers=args.workers,
+            db_path=args.db,
+            dry_run=args.dry_run,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

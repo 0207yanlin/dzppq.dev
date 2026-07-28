@@ -17,6 +17,7 @@ from src.card_rules import (  # noqa: E402
     normalize_card_label,
     resolve_card_label,
 )
+from src.match_db import ensure_match_schema  # noqa: E402
 from src.match_ground_truth import (  # noqa: E402
     DEFAULT_GT_PATH,
     load_match_ground_truth,
@@ -45,7 +46,7 @@ LEGACY_CARD_LABELS = frozenset(
         "蓝·开攒",
         "蓝·大亨",
         "蓝·一起刷刷刷",
-        "蓝·天降啾啾pro",
+        "蓝·天降揪揪pro",
         "蓝·重质拍档支援",
     }
 )
@@ -59,6 +60,8 @@ def normalize_ground_truth(data: dict) -> Counter:
         for player in entry.get("players", []):
             heroes = player.get("heroes", [])
             for card in player.get("cards", []):
+                if card.get("source") == "detail_ocr":
+                    continue
                 old_name = card.get("card_name", "")
                 new_name = _resolve_normalized_label(
                     old_name=old_name,
@@ -96,9 +99,11 @@ def normalize_match_db(db_path: Path, *, dry_run: bool = False) -> Counter:
     changes: Counter = Counter()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    ensure_match_schema(conn)
     rows = conn.execute(
         """
         SELECT c.id, c.card_name, c.slot_index, c.player_id,
+               c.card_source,
                m.path AS match_path, m.match_date AS match_batch
         FROM cards c
         JOIN players p ON p.id = c.player_id
@@ -106,6 +111,8 @@ def normalize_match_db(db_path: Path, *, dry_run: bool = False) -> Counter:
         """
     ).fetchall()
     for row in rows:
+        if row["card_source"] == "detail_ocr":
+            continue
         hero_rows = conn.execute(
             """
             SELECT h.id, h.hero_name, h.stars, he.equipment_name
@@ -189,6 +196,8 @@ def command_check(args: argparse.Namespace) -> None:
     for screenshot_name, entry in data.get("screenshots", {}).items():
         for player in entry.get("players", []):
             for card in player.get("cards", []):
+                if card.get("source") == "detail_ocr":
+                    continue
                 name = card.get("card_name", "")
                 if name in LEGACY_CARD_LABELS or name != normalize_card_label(name):
                     found[f"{screenshot_name} P{player['rank']} slot{card['slot_index']}: {name}"] += 1

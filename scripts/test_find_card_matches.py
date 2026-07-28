@@ -166,6 +166,33 @@ class FindCardMatchesTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].screenshot_name, "alias.png")
 
+    def test_prefers_exact_detail_name_before_canonical_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            conn = init_match_db(root / "matches.db")
+            insert_match_entry(
+                conn,
+                "detail.png",
+                _entry(
+                    path="screenshots.0705/detail.png",
+                    captured_at="2026-07-05T10:00:00",
+                    card_name="蓝·最佳拍档",
+                ),
+            )
+            insert_match_entry(
+                conn,
+                "legacy.png",
+                _entry(
+                    path="screenshots.0705/legacy.png",
+                    captured_at="2026-07-05T11:00:00",
+                    card_name="蓝·拍档支援",
+                ),
+            )
+            matches = find_matches_for_card(conn, "蓝·最佳拍档", root=root)
+            conn.close()
+
+        self.assertEqual([match.screenshot_name for match in matches], ["detail.png"])
+
     def test_no_matches_returns_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

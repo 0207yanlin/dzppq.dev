@@ -90,9 +90,15 @@ def load_prediction_context(args: argparse.Namespace) -> PredictionContext:
         rebuild_cache=args.rebuild_cache,
         search_radius=args.search_radius,
         verbose=not args.quiet,
+        ignore_card_sidecar=getattr(args, "ignore_card_sidecar", False),
     )
     ctx.initialize(args.screenshot_dir.resolve())
     return ctx
+
+
+def _card_sidecar_fingerprint(ctx: PredictionContext, img_path: Path) -> str | None:
+    getter = getattr(ctx, "card_sidecar_fingerprint", None)
+    return getter(img_path) if callable(getter) else None
 
 
 def predict_screenshot_entry(
@@ -105,10 +111,15 @@ def predict_screenshot_entry(
     existing = None
     if gt_data is not None:
         existing = gt_data.get("screenshots", {}).get(img_path.name)
+    sidecar_fingerprint = _card_sidecar_fingerprint(ctx, img_path)
     if (
         not force_predict
         and gt_data is not None
-        and prediction_cache_valid(existing, ctx.template_metadata or {})
+        and prediction_cache_valid(
+            existing,
+            ctx.template_metadata or {},
+            sidecar_fingerprint,
+        )
     ):
         return PredictionResult(
             img_path=img_path,
@@ -130,6 +141,7 @@ def predict_screenshot_entry(
         prediction,
         verified=False,
         template_metadata=ctx.template_metadata,
+        card_sidecar_fingerprint=sidecar_fingerprint,
     )
     return PredictionResult(
         img_path=img_path,
@@ -197,7 +209,12 @@ def paths_needing_prediction(
         existing = gt_data.get("screenshots", {}).get(img_path.name)
         if existing and existing.get("verified") and not force:
             continue
-        if force or not prediction_cache_valid(existing, ctx.template_metadata or {}):
+        sidecar_fingerprint = _card_sidecar_fingerprint(ctx, img_path)
+        if force or not prediction_cache_valid(
+            existing,
+            ctx.template_metadata or {},
+            sidecar_fingerprint,
+        ):
             needing.append(img_path)
     return needing
 
@@ -408,9 +425,14 @@ def label_one_screenshot(
         raise RuntimeError(f"failed to read screenshot: {img_path}")
 
     existing = gt_data.get("screenshots", {}).get(img_path.name)
+    sidecar_fingerprint = _card_sidecar_fingerprint(ctx, img_path)
     if (
         not force_predict
-        and prediction_cache_valid(existing, ctx.template_metadata or {})
+        and prediction_cache_valid(
+            existing,
+            ctx.template_metadata or {},
+            sidecar_fingerprint,
+        )
     ):
         draft_entry = existing
         print(f"Reusing cached prediction for {img_path.name}")
@@ -421,6 +443,7 @@ def label_one_screenshot(
             prediction,
             verified=False,
             template_metadata=ctx.template_metadata,
+            card_sidecar_fingerprint=sidecar_fingerprint,
         )
         set_screenshot_entry(gt_data, img_path.name, draft_entry)
         save_match_ground_truth(gt_data, gt_path)
@@ -522,6 +545,14 @@ def command_label(args: argparse.Namespace) -> None:
     print(f"Ground truth: {args.gt}")
 
 
+def _add_card_sidecar_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ignore-card-sidecar",
+        action="store_true",
+        help="Ignore .cards.json files and run offline card detection",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -586,6 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-predict all screenshots, ignoring prediction cache",
     )
+    _add_card_sidecar_option(predict)
     predict.set_defaults(func=command_predict)
 
     label = subparsers.add_parser("label", help="Correct and save labels")
@@ -610,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --all, save unverified predictions without interactive review",
     )
+    _add_card_sidecar_option(label)
     label.set_defaults(func=command_label)
     return parser
 

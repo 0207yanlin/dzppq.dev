@@ -20,16 +20,16 @@ FAST_XXB_PRO_LABEL = "黄·吸吸宝pro"
 FAST_XXB_LABEL = "黄·快速成型"
 MANA_FOCUS_LABEL = "白·法力专注"
 KZDH_LABEL = "蓝·开攒大亨"
-SSS_LABEL = "蓝·一起刷刷刷+天降啾啾pro"
+SSS_LABEL = "蓝·一起刷刷刷+天降揪揪pro"
 SSS_NORMAL_LABEL = "蓝·我们全都要+一起刷刷刷"
-SSS_PRO_LABEL = "蓝·天降啾啾pro"
+SSS_PRO_LABEL = "蓝·天降揪揪pro"
 SSS_GROUP = frozenset(
     {
         "我们全都要",
         "一起刷刷刷",
         "我们全都要+一起刷刷刷",
-        "天降啾啾pro",
-        "一起刷刷刷+天降啾啾pro",
+        "天降揪揪pro",
+        "一起刷刷刷+天降揪揪pro",
     }
 )
 GROWTH_BOSS_LABEL = "蓝·我是老大+快速成长"
@@ -53,6 +53,7 @@ YELLOW_DEATH_ROCK_LABEL = "黄·死亡摇滚"
 YELLOW_SHAKE_BOX_LABEL = "黄·摇盒高手"
 YELLOW_DEATH_ROCK_SHAKE_BOX_GROUP = frozenset({"死亡摇滚", "摇盒高手"})
 DEATH_ROCK_START_BATCH = "0723"
+CONCRETE_CARD_START_BATCH = "0727"
 DEATH_ROCK_HERO_NAME = "吉他手卡萝"
 _SCREENSHOT_BATCH_RE = re.compile(r"screenshots\.(\d{4})(?:[/\\]|$)", re.IGNORECASE)
 
@@ -63,7 +64,9 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "最强支援": "拍档支援",
     "我们全都要": SSS_NORMAL_LABEL,
     "一起刷刷刷": SSS_NORMAL_LABEL,
+    "天降揪揪pro": SSS_PRO_LABEL,
     "天降啾啾pro": SSS_PRO_LABEL,
+    "一起刷刷刷+天降啾啾pro": SSS_LABEL,
     "我是老大": GROWTH_BOSS_LABEL,
     "快速成长": GROWTH_BOSS_LABEL,
     "专业打手": PRO_ADVENTURE_LABEL,
@@ -93,7 +96,9 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "蓝·大亨": KZDH_LABEL,
     "蓝·我们全都要": SSS_NORMAL_LABEL,
     "蓝·一起刷刷刷": SSS_NORMAL_LABEL,
+    "蓝·天降揪揪pro": SSS_PRO_LABEL,
     "蓝·天降啾啾pro": SSS_PRO_LABEL,
+    "蓝·一起刷刷刷+天降啾啾pro": SSS_LABEL,
     "蓝·我是老大": GROWTH_BOSS_LABEL,
     "蓝·快速成长": GROWTH_BOSS_LABEL,
     "蓝·专业打手": PRO_ADVENTURE_LABEL,
@@ -114,8 +119,6 @@ CARD_LABEL_ALIASES: dict[str, str] = {
     "彩·法师礼包": CAI_GIFT_PACK_LABEL,
     "彩·射手礼包": CAI_GIFT_PACK_LABEL,
     "彩·战士礼包": CAI_GIFT_PACK_LABEL,
-    "蓝·半步满级": "蓝·半步满级+满级玩家",
-    "蓝·满级玩家": "蓝·半步满级+满级玩家",
     "迅迅迅捷双剑": YELLOW_XJ_LABEL,
     "巨神兵": YELLOW_JSB_LABEL,
 }
@@ -199,6 +202,15 @@ def card_rule_batch(
     return match.group(1) if match else None
 
 
+def uses_concrete_card_labels(
+    match_path: str | None = None,
+    match_batch: str | None = None,
+) -> bool:
+    """Return whether this screenshot batch uses detail-confirmed concrete names."""
+    batch = card_rule_batch(match_path, match_batch)
+    return batch is not None and batch >= CONCRETE_CARD_START_BATCH
+
+
 def resolve_card_label(
     label: str,
     slot_index: int,
@@ -213,6 +225,12 @@ def resolve_card_label(
     Database consumers should call ``resolve_jsb_xj_card_labels`` for ratio-based
     seeded assignment of those ties.
     """
+    if uses_concrete_card_labels(match_path, match_batch):
+        # From 0727 onward every shared icon is resolved by detail OCR.  Keep
+        # the concrete workbook label instead of applying legacy aliases or
+        # inferring a different card from the final board.
+        return label
+
     label = normalize_card_label(label)
     prefix, body = split_card_prefix(label)
     heroes = heroes or []
@@ -269,9 +287,14 @@ def resolve_card_labels(
     - ``slot_index``: card slot
     - ``heroes``: player hero context with ``equipments``
     - optional ``match_path``/``path`` or ``match_batch``/``batch``
+    - optional ``is_ground_truth`` or ``source`` provenance
 
     巨神兵 / 迅迅迅捷双剑 clear samples determine the ratio used for their
-    ties. Ties retain fixed-seed, stable-input-order assignment.
+    ties. Authoritative items (``is_ground_truth=True`` or
+    ``source="detail_ocr"``) keep their labels byte-for-byte and bypass every
+    normalization/context rule, while authoritative 巨神兵 / 迅迅迅捷双剑
+    labels may still contribute clear counts. Ties retain fixed-seed,
+    stable-input-order assignment.
     """
     if not items:
         return []
@@ -282,6 +305,14 @@ def resolve_card_labels(
 
     for index, item in enumerate(items):
         label = str(item["label"])
+        is_authoritative = bool(item.get("is_ground_truth")) or (
+            item.get("source") == "detail_ocr"
+        )
+        if is_authoritative:
+            preliminary.append(label)
+            if label in {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL}:
+                clear_counts[label] += 1
+            continue
         slot_index = int(item["slot_index"])
         heroes = item.get("heroes") or []
         resolved = resolve_card_label(

@@ -48,10 +48,9 @@ def find_matches_for_card(
     root: Path = ROOT,
     limit: int | None = None,
 ) -> list[MatchHit]:
-    """Return matches containing ``card_name``, oldest first, one row per match."""
+    """Return exact-name matches, falling back to the canonical legacy label."""
     canonical = normalize_card_label(card_name)
-    rows = conn.execute(
-        """
+    query = """
         SELECT
             m.id,
             m.screenshot_name,
@@ -68,9 +67,10 @@ def find_matches_for_card(
             m.screenshot_name ASC,
             p.rank ASC,
             c.slot_index ASC
-        """,
-        (canonical,),
-    ).fetchall()
+    """
+    rows = conn.execute(query, (card_name,)).fetchall()
+    if not rows and canonical != card_name:
+        rows = conn.execute(query, (canonical,)).fetchall()
 
     by_match: dict[int, MatchHit] = {}
     order: list[int] = []

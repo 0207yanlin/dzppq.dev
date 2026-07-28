@@ -13,6 +13,7 @@ import importlib.util
 import sys
 
 import unittest
+from unittest.mock import patch
 
 from pathlib import Path
 
@@ -1253,48 +1254,29 @@ class MetaReportContractTests(unittest.TestCase):
 
 
 
-    def test_blue_card_note_describes_new_merged_statistics(self) -> None:
+    def test_blue_card_note_describes_concrete_statistics(self) -> None:
 
         note = MODULE.CARD_MERGE_NOTES["蓝"]
 
-        self.assertIn("我们全都要，一起刷刷刷 -> 我们全都要+一起刷刷刷", note)
-
-        self.assertIn("我是老大，快速成长 -> 我是老大+快速成长", note)
-
-        self.assertIn("专业打手，冒险 -> 专业打手+冒险", note)
-
-        self.assertIn("啾啾装备数量分别统计", note)
-
-        self.assertNotIn("一起刷刷刷+天降啾啾pro", note)
+        self.assertIn("2026-07-27", note)
+        self.assertIn("具体卡名", note)
+        self.assertIn("独立统计", note)
+        self.assertNotIn("合并", note)
 
 
 
-    def test_yellow_card_note_describes_jsb_xj_equipment_rules(self) -> None:
+    def test_yellow_card_note_describes_concrete_statistics(self) -> None:
 
         note = MODULE.CARD_MERGE_NOTES["黄"]
 
-        self.assertIn("巨神兵", note)
-
-        self.assertIn("迅迅迅捷双剑", note)
-
-        self.assertIn("数量占优", note)
-
-        self.assertIn("固定种子", note)
-
-        self.assertIn("分别统计", note)
+        self.assertIn("2026-07-27", note)
+        self.assertIn("具体卡名", note)
+        self.assertNotIn("固定种子", note)
 
         self.assertEqual(
             MODULE.MERGED_TEMPLATE_EXPANSIONS["黄·巨神兵+迅迅迅捷双剑"],
             ["黄·巨神兵", "黄·迅迅迅捷双剑"],
         )
-
-        md = MODULE.render_md(sample_data())
-
-        self.assertIn("巨神兵之斧", md)
-
-        self.assertIn("固定种子可复现分配", md)
-
-
 
     def test_yellow_rock_template_expands_to_two_logical_catalog_keys(self) -> None:
 
@@ -1309,21 +1291,31 @@ class MetaReportContractTests(unittest.TestCase):
 
         self.assertIn("黄·摇盒高手", yellow_catalog)
 
+    def test_report_catalog_contains_only_concrete_reporting_names(self) -> None:
+        blue_catalog = MODULE.load_report_card_catalog()["蓝"]
+        self.assertIn("蓝·最佳拍档", blue_catalog)
+        self.assertIn("蓝·最强支援", blue_catalog)
+        self.assertNotIn("蓝·拍档支援", blue_catalog)
+        self.assertNotIn("蓝·我们全都要+一起刷刷刷", blue_catalog)
+        self.assertIn("蓝·我们全都要", blue_catalog)
+        self.assertIn("蓝·一起刷刷刷", blue_catalog)
+        self.assertIn("蓝·天降揪揪pro", blue_catalog)
+
+    def test_report_catalog_falls_back_when_workbook_is_missing(self) -> None:
+        missing = ROOT / "data" / "__missing_card_details__.xlsx"
+        with patch.object(MODULE, "CARD_DETAILS_PATH", missing):
+            catalog = MODULE.load_report_card_catalog()
+        self.assertIn("黄·摇盒高手", catalog["黄"])
 
 
-    def test_yellow_card_note_describes_rock_batch_and_carol_rule(self) -> None:
+
+    def test_yellow_card_note_removes_legacy_rock_inference(self) -> None:
 
         note = MODULE.CARD_MERGE_NOTES["黄"]
 
-        self.assertIn("死亡摇滚", note)
-
-        self.assertIn("摇盒高手", note)
-
-        self.assertIn("screenshots.0723", note)
-
-        self.assertIn("吉他手卡萝", note)
-
-        self.assertIn("更早批次一律为摇盒高手", note)
+        self.assertIn("详情 OCR", note)
+        self.assertNotIn("吉他手卡萝", note)
+        self.assertNotIn("screenshots.0723", note)
 
 
 

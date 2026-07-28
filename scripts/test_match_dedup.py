@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,10 +16,12 @@ if str(ROOT) not in sys.path:
 from src.match_db import (  # noqa: E402
     build_match_fingerprint,
     cluster_similar_entries,
+    ensure_match_schema,
     import_ground_truth,
     init_match_db,
     insert_match_entry,
     is_similar_match,
+    load_indexed_matches,
     parse_match_batch,
 )
 
@@ -64,6 +67,58 @@ def _sample_entry(
 
 
 class MatchDedupTests(unittest.TestCase):
+    def test_existing_database_adds_nullable_card_source(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE matches (
+                id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+                captured_at TEXT, match_date TEXT
+            );
+            CREATE TABLE cards (
+                id INTEGER PRIMARY KEY, card_name TEXT NOT NULL
+            );
+            INSERT INTO cards (id, card_name) VALUES (1, '历史卡');
+            """
+        )
+        ensure_match_schema(conn)
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()
+        }
+        source = conn.execute(
+            "SELECT card_source FROM cards WHERE id = 1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertIn("card_source", columns)
+        self.assertIsNone(source)
+
+    def test_insert_and_reconstruct_preserve_card_score_and_source(self) -> None:
+        entry = _sample_entry(card_name="蓝·最佳拍档")
+        entry["players"][0]["cards"][0].update(
+            {"score": 0.987, "source": "detail_ocr"}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = init_match_db(Path(tmpdir) / "matches.db")
+            insert_match_entry(conn, "example.png", entry)
+            row = conn.execute(
+                "SELECT card_name, card_source FROM cards ORDER BY id LIMIT 1"
+            ).fetchone()
+            reconstructed = load_indexed_matches(conn)[0].entry
+            conn.close()
+        self.assertEqual(row, ("蓝·最佳拍档", "detail_ocr"))
+        cards = reconstructed["players"][0]["cards"]
+        self.assertEqual(
+            cards[0],
+            {
+                "slot_index": 0,
+                "card_name": "蓝·最佳拍档",
+                "score": 0.987,
+                "source": "detail_ocr",
+            },
+        )
+        self.assertNotIn("score", cards[1])
+        self.assertNotIn("source", cards[1])
+
     def test_parse_match_batch_prefers_path_over_captured_at(self) -> None:
         batch = parse_match_batch(
             "screenshots.0701/MuMu-20260702-010000-001.png",

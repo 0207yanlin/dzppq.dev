@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
 import json
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -37,6 +39,7 @@ from src.card_rules import (  # noqa: E402
 )
 from src.layout import NUM_CARDS, NUM_PLAYERS  # noqa: E402
 from scripts.normalize_card_ground_truth import (  # noqa: E402
+    command_check,
     normalize_ground_truth,
     normalize_match_db,
 )
@@ -118,18 +121,18 @@ class SelectCardMatchTests(unittest.TestCase):
         self.assertEqual(decision.label, "彩·大富翁")
         self.assertEqual(decision.debug["match_path"], "shape_family_color_rescue")
 
-    def test_merged_full_level_player_alias(self) -> None:
+    def test_full_level_shared_template_color_rescue(self) -> None:
         self.assertEqual(
             normalize_template_label("蓝·半步满级.jpg"),
-            "蓝·半步满级+满级玩家",
+            "蓝·半步满级",
         )
         self.assertEqual(
             normalize_template_label("蓝·满级玩家.jpg"),
-            "蓝·半步满级+满级玩家",
+            "蓝·满级玩家",
         )
         details = [
             _detail("白·满级玩家.jpg", combined=0.80, shape=0.86, color=0.72),
-            _detail("蓝·半步满级.jpg", combined=0.78, shape=0.84, color=0.95),
+            _detail("蓝·半步满级+满级玩家.jpg", combined=0.78, shape=0.84, color=0.95),
         ]
         decision = self._select(details)
         self.assertEqual(decision.label, "蓝·半步满级+满级玩家")
@@ -225,6 +228,26 @@ class SelectCardMatchTests(unittest.TestCase):
             {"shape_family_color_rescue", "shape_cluster_color", "combined"},
         )
 
+    def test_egg_transform_rank6_narrow_color_lead_resolves_white(self) -> None:
+        details = [
+            _detail(
+                "白·蛋仔变变变.jpg",
+                combined=0.8787315982892552,
+                shape=0.8534489870071411,
+                color=0.9799974204671575,
+            ),
+            _detail(
+                "彩·装备变变变.jpg",
+                combined=0.8726275944575494,
+                shape=0.8522427678108215,
+                color=0.9543022780939068,
+            ),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "白·蛋仔变变变")
+        self.assertEqual(decision.debug["match_path"], "shape_family_color_rescue")
+        self.assertEqual(decision.debug["reject_reason"], "accepted")
+
     def test_fighter_color_rescue(self) -> None:
         details = [
             _detail("蓝·打手.jpg", combined=0.81, shape=0.89, color=0.73),
@@ -307,6 +330,16 @@ class SelectCardMatchTests(unittest.TestCase):
 
 
 class CardContextRuleTests(unittest.TestCase):
+    def test_legacy_tian_jiang_jiu_jiu_aliases_use_correct_name(self) -> None:
+        self.assertEqual(
+            normalize_card_label("蓝·天降啾啾pro"),
+            "蓝·天降揪揪pro",
+        )
+        self.assertEqual(
+            normalize_template_label("蓝·一起刷刷刷+天降啾啾pro.jpg"),
+            "蓝·一起刷刷刷+天降揪揪pro",
+        )
+
     def test_rock_box_0722_with_carol_stays_shake_box(self) -> None:
         heroes = [{"hero_name": "吉他手卡萝"}]
         self.assertEqual(
@@ -388,6 +421,8 @@ class CardContextRuleTests(unittest.TestCase):
         for label in (
             "我们全都要",
             "一起刷刷刷",
+            "蓝·天降揪揪pro",
+            "蓝·一起刷刷刷+天降揪揪pro",
             "蓝·天降啾啾pro",
             "蓝·一起刷刷刷+天降啾啾pro",
         ):
@@ -396,11 +431,11 @@ class CardContextRuleTests(unittest.TestCase):
                 "蓝·我们全都要+一起刷刷刷",
             )
         self.assertEqual(
-            resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, None),
+            resolve_card_label("蓝·一起刷刷刷+天降揪揪pro", 0, None),
             "蓝·我们全都要+一起刷刷刷",
         )
         self.assertEqual(
-            resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0),
+            resolve_card_label("蓝·一起刷刷刷+天降揪揪pro", 0),
             "蓝·我们全都要+一起刷刷刷",
         )
 
@@ -413,20 +448,20 @@ class CardContextRuleTests(unittest.TestCase):
             ),
             (
                 [{"equipments": ["火焰啾啾", "寒冰啾啾"]}],
-                "蓝·天降啾啾pro",
+                "蓝·天降揪揪pro",
             ),
             (
                 [
                     {"equipments": ["核选火焰啾啾"]},
                     {"equipments": ["寒冰啾啾", "普通装备"]},
                 ],
-                "蓝·天降啾啾pro",
+                "蓝·天降揪揪pro",
             ),
         ]
         for heroes, expected in cases:
             with self.subTest(heroes=heroes):
                 self.assertEqual(
-                    resolve_card_label("蓝·一起刷刷刷+天降啾啾pro", 0, heroes),
+                    resolve_card_label("蓝·一起刷刷刷+天降揪揪pro", 0, heroes),
                     expected,
                 )
 
@@ -442,6 +477,38 @@ class CardContextRuleTests(unittest.TestCase):
         for label, expected in cases.items():
             with self.subTest(label=label):
                 self.assertEqual(resolve_card_label(label, 0, []), expected)
+
+    def test_0727_concrete_cards_bypass_legacy_context_rules(self) -> None:
+        labels = (
+            "蓝·我们全都要",
+            "蓝·一起刷刷刷",
+            "蓝·利己主义",
+            "蓝·最后的波纹",
+            "蓝·开攒",
+            "蓝·大亨",
+            "黄·巨神兵",
+            "黄·迅迅迅捷双剑",
+            "黄·死亡摇滚",
+            "黄·摇盒高手",
+        )
+        misleading_context = [
+            {
+                "hero_name": "吉他手卡萝",
+                "stars": 3,
+                "equipments": ["巨神兵之斧", "火焰啾啾", "寒冰啾啾"],
+            }
+        ]
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    resolve_card_label(
+                        label,
+                        0,
+                        misleading_context,
+                        match_batch="0727",
+                    ),
+                    label,
+                )
 
     def test_jsb_xj_templates_normalize_to_merged_label(self) -> None:
         self.assertEqual(
@@ -546,8 +613,79 @@ class CardContextRuleTests(unittest.TestCase):
         self.assertEqual(len(resolved), 2)
         self.assertTrue(all(label in {YELLOW_JSB_LABEL, YELLOW_XJ_LABEL} for label in resolved))
 
+    def test_authoritative_labels_bypass_rules_but_feed_jsb_xj_ratio(self) -> None:
+        items = [
+            {
+                "label": "蓝·最佳拍档",
+                "slot_index": 0,
+                "heroes": [{"stars": 3}, {"stars": 3}, {"stars": 3}],
+                "source": "detail_ocr",
+            },
+            {
+                "label": YELLOW_XJ_LABEL,
+                "slot_index": 1,
+                "heroes": [{"equipments": ["巨神兵之斧"]}],
+                "is_ground_truth": True,
+            },
+            {"label": YELLOW_JSB_LABEL, "slot_index": 2, "heroes": []},
+        ]
+        resolved = resolve_card_labels(items, seed=0)
+        self.assertEqual(resolved[0], "蓝·最佳拍档")
+        self.assertEqual(resolved[1], YELLOW_XJ_LABEL)
+        self.assertEqual(resolved[2], YELLOW_XJ_LABEL)
+
 
 class RockBoxNormalizerTests(unittest.TestCase):
+    def test_json_normalizer_skips_detail_ocr(self) -> None:
+        data = {
+            "screenshots": {
+                "detail.png": {
+                    "players": [
+                        {
+                            "heroes": [],
+                            "cards": [
+                                {
+                                    "slot_index": 0,
+                                    "card_name": "蓝·最佳拍档",
+                                    "source": "detail_ocr",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+        self.assertFalse(normalize_ground_truth(data))
+        self.assertEqual(
+            data["screenshots"]["detail.png"]["players"][0]["cards"][0]["card_name"],
+            "蓝·最佳拍档",
+        )
+
+    def test_json_check_skips_detail_ocr(self) -> None:
+        data = {
+            "screenshots": {
+                "detail.png": {
+                    "players": [
+                        {
+                            "rank": 1,
+                            "cards": [
+                                {
+                                    "slot_index": 0,
+                                    "card_name": "蓝·最佳拍档",
+                                    "source": "detail_ocr",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+        with patch(
+            "scripts.normalize_card_ground_truth.load_match_ground_truth",
+            return_value=data,
+        ):
+            command_check(Namespace(gt=Path("unused.json")))
+
     def test_json_normalizer_uses_entry_path_and_enforces_batch_rule(self) -> None:
         data = {
             "screenshots": {
@@ -629,6 +767,51 @@ class RockBoxNormalizerTests(unittest.TestCase):
             stored = conn.execute("SELECT card_name FROM cards").fetchone()[0]
             conn.close()
             self.assertEqual(stored, YELLOW_DEATH_ROCK_LABEL)
+
+    def test_sqlite_normalizer_skips_detail_ocr_and_migrates_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "matches.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE matches (
+                    id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+                    captured_at TEXT, match_date TEXT
+                );
+                CREATE TABLE players (
+                    id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL
+                );
+                CREATE TABLE heroes (
+                    id INTEGER PRIMARY KEY, player_id INTEGER NOT NULL,
+                    slot_index INTEGER NOT NULL, hero_name TEXT NOT NULL,
+                    stars INTEGER NOT NULL
+                );
+                CREATE TABLE hero_equipments (
+                    id INTEGER PRIMARY KEY, hero_id INTEGER NOT NULL,
+                    item_index INTEGER NOT NULL, equipment_name TEXT NOT NULL
+                );
+                CREATE TABLE cards (
+                    id INTEGER PRIMARY KEY, player_id INTEGER NOT NULL,
+                    slot_index INTEGER NOT NULL, card_name TEXT NOT NULL,
+                    card_source TEXT
+                );
+                INSERT INTO matches VALUES
+                    (1, 'screenshots.0723/example.png', NULL, '0723');
+                INSERT INTO players VALUES (1, 1);
+                INSERT INTO cards VALUES
+                    (1, 1, 0, '蓝·最佳拍档', 'detail_ocr');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            self.assertFalse(normalize_match_db(db_path))
+            conn = sqlite3.connect(db_path)
+            stored = conn.execute(
+                "SELECT card_name FROM cards WHERE id = 1"
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(stored, "蓝·最佳拍档")
 
 
 class DetectCardsRoiTests(unittest.TestCase):

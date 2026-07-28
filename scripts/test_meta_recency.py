@@ -126,6 +126,23 @@ class MetaRecencyTests(unittest.TestCase):
         self.assertEqual(metadata["latest_batch"], "0725")
         self.assertEqual(metadata["excluded_players"], 1)
 
+    def test_hard_start_date_excludes_pre_0727_records(self) -> None:
+        features = [
+            make_feature(1, 1, "0726"),
+            make_feature(2, 2, "0727"),
+            make_feature(3, 3, "0728"),
+            make_feature(4, 4, "invalid"),
+        ]
+        filtered = MODULE.filter_features_since_date(
+            features,
+            MODULE.MIN_ANALYSIS_DATE,
+            reference_date=date(2026, 7, 28),
+        )
+        self.assertEqual(
+            [feature.match_batch for feature in filtered],
+            ["0727", "0728"],
+        )
+
     def test_lookback_handles_cross_year_and_missing_batches(self) -> None:
         features = [
             make_feature(1, 1, "1223"),

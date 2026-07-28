@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,6 +18,7 @@ META_JSON = ROOT / "data" / "latest_meta_analysis.json"
 MATCH_DB = ROOT / "data" / "match_latest.db"
 DIST_DIR = ROOT / "dist" / "DZPPQCardRecommender"
 BUILD_DIR = ROOT / "build" / "DZPPQCardRecommender"
+STAGING_DIST_ROOT = ROOT / "build" / "DZPPQCardRecommender-dist"
 EXE_NAME = "DZPPQCardRecommender"
 
 # Avoid --collect-all onnxruntime: it pulls tools/transformers and can drag torch/scipy in.
@@ -48,31 +51,53 @@ OCR_HIDDEN_IMPORTS = [
 ]
 
 EXPECTED_ONNX_MODELS = 3
-REQUIRED_SPLIT_CARD_KEYS = frozenset(
+MIN_RUNTIME_MATCH_DATE = date(2026, 7, 27)
+REQUIRED_CONCRETE_CARD_KEYS = frozenset(
     {
-        "蓝·我们全都要+一起刷刷刷",
-        "蓝·天降啾啾pro",
-        "蓝·我是老大+快速成长",
-        "蓝·专业打手+冒险",
-        "蓝·重质也重量pro",
-        "蓝·拍档支援",
-        "黄·快速成型",
-        "黄·吸吸宝pro",
-        "黄·巨神兵",
-        "黄·迅迅迅捷双剑",
-        "黄·死亡摇滚",
-        "黄·摇盒高手",
-    }
-)
-STALE_SPLIT_RANKING_KEYS = frozenset(
-    {
-        "蓝·一起刷刷刷+天降啾啾pro",
+        "蓝·半步满级",
+        "蓝·满级玩家",
         "蓝·我们全都要",
         "蓝·一起刷刷刷",
+        "蓝·天降揪揪pro",
         "蓝·我是老大",
         "蓝·快速成长",
         "蓝·专业打手",
         "蓝·冒险",
+        "蓝·重质也重量pro",
+        "蓝·最佳拍档",
+        "蓝·最强支援",
+        "蓝·开攒",
+        "蓝·大亨",
+        "蓝·利己主义",
+        "蓝·最后的波纹",
+        "黄·快速成型",
+        "黄·吸吸宝pro",
+        "黄·巨神兵",
+        "黄·死亡摇滚",
+        "黄·摇盒高手",
+        "黄·大力",
+        "黄·巫术",
+        "黄·守护",
+    }
+)
+STALE_MERGED_RANKING_KEYS = frozenset(
+    {
+        "蓝·半步满级+满级玩家",
+        "蓝·一起刷刷刷+天降揪揪pro",
+        "蓝·我们全都要+一起刷刷刷",
+        "蓝·我是老大+快速成长",
+        "蓝·专业打手+冒险",
+        "蓝·重质拍档支援",
+        "蓝·拍档支援",
+        "蓝·开攒大亨",
+        "蓝·福袋有钱",
+        "蓝·波纹利己",
+        "黄·吸吸宝pro快速成型",
+        "黄·巨神兵+迅迅迅捷双剑",
+        "黄·大力巫术守护",
+        "黄·装备共鸣",
+        "彩·法师战士射手礼包",
+        "彩·装备共鸣pro",
     }
 )
 
@@ -277,6 +302,31 @@ def validate_runtime_data(output_dir: Path, *, check_bundled: bool = False) -> N
                 errors.append(f"stale copied runtime data differs from source: {copied}")
 
     copied_json = data_dirs[0] / META_JSON.name
+    copied_db = data_dirs[0] / MATCH_DB.name
+    if copied_db.is_file():
+        try:
+            conn = sqlite3.connect(f"file:{copied_db.as_posix()}?mode=ro", uri=True)
+            stale_matches = conn.execute(
+                """
+                SELECT path, captured_at
+                FROM matches
+                WHERE captured_at IS NULL OR date(captured_at) < ?
+                ORDER BY captured_at, path
+                """,
+                (MIN_RUNTIME_MATCH_DATE.isoformat(),),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            errors.append(f"invalid runtime DB {copied_db}: {exc}")
+        else:
+            if stale_matches:
+                examples = ", ".join(str(row[0]) for row in stale_matches[:3])
+                errors.append(
+                    f"runtime DB contains {len(stale_matches)} pre-cutoff match(es): {examples}"
+                )
+        finally:
+            if "conn" in locals():
+                conn.close()
+
     if copied_json.is_file():
         try:
             payload = json.loads(copied_json.read_text(encoding="utf-8"))
@@ -292,11 +342,11 @@ def validate_runtime_data(output_dir: Path, *, check_bundled: bool = False) -> N
                 for row in rows
                 if isinstance(row, dict) and row.get("key")
             }
-            missing = sorted(REQUIRED_SPLIT_CARD_KEYS - catalog_keys)
+            missing = sorted(REQUIRED_CONCRETE_CARD_KEYS - catalog_keys)
             if missing:
-                errors.append("missing split logical card keys: " + ", ".join(missing))
+                errors.append("missing concrete card keys: " + ", ".join(missing))
 
-            stale = sorted(STALE_SPLIT_RANKING_KEYS & _ranking_keys(cards))
+            stale = sorted(STALE_MERGED_RANKING_KEYS & _ranking_keys(cards))
             if stale:
                 errors.append("stale merged ranking keys remain: " + ", ".join(stale))
 
@@ -304,7 +354,7 @@ def validate_runtime_data(output_dir: Path, *, check_bundled: bool = False) -> N
         raise SystemExit("Runtime data validation failed:\n  - " + "\n  - ".join(errors))
     print(
         "Runtime data OK: source files match dist; "
-        f"split logical keys={len(REQUIRED_SPLIT_CARD_KEYS)}"
+        f"concrete keys={len(REQUIRED_CONCRETE_CARD_KEYS)}"
     )
 
 
@@ -333,14 +383,28 @@ def summarize_dist(output_dir: Path) -> None:
 
 def run_build(*, onefile: bool, clean: bool, full: bool) -> Path:
     ensure_pyinstaller()
+    staging_output_dir: Path | None = None
     if clean:
         shutil.rmtree(DIST_DIR, ignore_errors=True)
         shutil.rmtree(BUILD_DIR, ignore_errors=True)
+        shutil.rmtree(STAGING_DIST_ROOT, ignore_errors=True)
         spec = ROOT / f"{EXE_NAME}.spec"
         if spec.exists():
             spec.unlink()
 
     cmd = build_command(onefile=onefile, full=full)
+    if clean and not onefile and DIST_DIR.exists():
+        remaining = [path for path in DIST_DIR.rglob("*")]
+        if remaining:
+            examples = ", ".join(str(path.relative_to(DIST_DIR)) for path in remaining[:3])
+            raise SystemExit(
+                "Cannot clean previous dist; close the running recommender first. "
+                f"Remaining: {examples}"
+            )
+        # Windows Explorer can retain an open handle on an otherwise empty
+        # directory. Build elsewhere, then copy into that empty directory.
+        staging_output_dir = STAGING_DIST_ROOT / EXE_NAME
+        cmd.extend(["--distpath", str(STAGING_DIST_ROOT)])
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
 
@@ -349,6 +413,9 @@ def run_build(*, onefile: bool, clean: bool, full: bool) -> Path:
         exe_path = output_dir / f"{EXE_NAME}.exe"
         copy_runtime_data(output_dir)
     else:
+        if staging_output_dir is not None:
+            shutil.copytree(staging_output_dir, DIST_DIR, dirs_exist_ok=True)
+            shutil.rmtree(STAGING_DIST_ROOT, ignore_errors=True)
         output_dir = DIST_DIR
         exe_path = output_dir / f"{EXE_NAME}.exe"
         copy_runtime_data(output_dir)

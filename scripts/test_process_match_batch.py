@@ -19,6 +19,7 @@ from scripts.process_match_batch import (  # noqa: E402
     DEFAULT_DB_PATH,
     DEFAULT_GT_PATH,
     META_SCRIPT,
+    build_parser,
     build_import_cmd,
     build_label_cmd,
     build_meta_cmd,
@@ -79,6 +80,12 @@ def test_build_commands_include_expected_args() -> None:
     meta_cmd = build_meta_cmd(db_path=db_path)
     assert Path(meta_cmd[1]) == META_SCRIPT
     assert meta_cmd[meta_cmd.index("--db") + 1] == str(db_path)
+
+
+def test_parser_accepts_explicit_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "match_0727_rebuild.db"
+    args = build_parser().parse_args(["--batch", "0727", "--db", str(db_path)])
+    assert args.db == db_path
 
 
 def test_process_batch_runs_three_steps_in_order(tmp_path: Path, monkeypatch) -> None:

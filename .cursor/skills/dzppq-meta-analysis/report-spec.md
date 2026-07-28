@@ -203,10 +203,10 @@ Primary card ranking:
 - within each prefix group, sort primary card rankings by sample count first, then adjusted rank and outcome metrics.
 - first-card rankings use `cards[0]`.
 - group single-card and first-card rankings by card template prefix type (`彩` / `黄` / `蓝` / `白` / `其他`) and rank within each group; do not compare different prefix types on one leaderboard.
-- unprefixed disambiguated labels such as `吸吸宝pro` and `快速成型` should inherit their source prefix type for grouping; `蓝·重质也重量pro` and `蓝·拍档支援` keep their template prefix directly.
-- `蓝·一起刷刷刷` and `蓝·天降啾啾pro` share one icon template but must be resolved separately: count final-board equipment names ending in `啾啾`; `>= 2` resolves to `蓝·天降啾啾pro`, otherwise `蓝·一起刷刷刷`. Legacy merged labels are input aliases only; rankings and reports must not call them one merged statistic.
-- `黄·巨神兵` and `黄·迅迅迅捷双剑` share one icon template but must be resolved separately: count final-board `巨神兵之斧` / `迅捷双剑` (optional `核选` prefix stripped); axe-only -> `黄·巨神兵`, sword-only -> `黄·迅迅迅捷双剑`, both present -> majority count; equal counts (including both zero) use the clear-sample ratio from the current database with a fixed seed. Legacy/merged labels are input aliases only; rankings and reports must not call them one merged statistic.
-- `黄·死亡摇滚` and `黄·摇盒高手` share the single `黄·摇盒高手` template, which expands to both logical catalog keys. Starting with `screenshots.0723`, final boards containing `吉他手卡萝` resolve to `黄·死亡摇滚`; boards without her resolve to `黄·摇盒高手`. All earlier batches resolve to `黄·摇盒高手`. Database loaders must pass `matches.path` and parsed `batch` to the shared card-label resolver, and rankings must never use a merged label for this pair.
+- enforce a hard analysis start date of 2026-07-27; pre-cutoff matches must not affect card rankings or recommendations.
+- from `screenshots.0727` onward, shared-icon cards are resolved by detail OCR and each concrete workbook name is an independent ranking key. This includes SSS, QUALITY, FAST/XXB, 开攒/大亨, 波纹/利己, 礼包, 装备共鸣, 巨神兵/迅迅迅捷双剑, and 死亡摇滚/摇盒高手 groups.
+- treat `蓝·半步满级` / `蓝·满级玩家` as a shared-template exception whose 0727 slots are `unknown`; only 0728+ detail-confirmed captures may enter their independent ranking keys.
+- never use final-board heroes/equipment to overwrite a 0727+ concrete card name. A capture that cannot be uniquely confirmed remains `unknown` and is excluded from card rankings rather than assigned to a merged or inferred key.
 - blue cards are duo-oriented and should additionally include a recomputed team-rank view with team average rank and team top2 rate.
 
 Secondary card views:

@@ -6,7 +6,7 @@ from __future__ import annotations
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ DEFAULT_RECENCY_HALF_LIFE_DAYS = 2.0
 MIN_RECENCY_WEIGHT = 0.25
 ADJUSTED_RANK_PRIOR = 8
 CARD_PREFIX_TYPES = ("彩", "黄", "蓝", "白", "其他")
+MIN_CARD_STATS_DATE = date(2026, 7, 27)
 
 
 @dataclass
@@ -87,6 +88,24 @@ def _batch_ordinal(batch: str | None) -> int:
     if batch and len(batch) == 4 and batch.isdigit():
         return int(batch[:2]) * 100 + int(batch[2:])
     return 0
+
+
+def _batch_date(batch: str | None, reference: date | None = None) -> date | None:
+    if not batch or len(batch) != 4 or not batch.isdigit():
+        return None
+    current = reference or date.today()
+    try:
+        candidate = date(current.year, int(batch[:2]), int(batch[2:]))
+    except ValueError:
+        return None
+    if candidate > current + timedelta(days=1):
+        candidate = candidate.replace(year=candidate.year - 1)
+    return candidate
+
+
+def _is_supported_batch(batch: str | None) -> bool:
+    inferred = _batch_date(batch)
+    return inferred is not None and inferred >= MIN_CARD_STATS_DATE
 
 
 def _card_prefix_type(card_name: str) -> str:
@@ -185,8 +204,13 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
             "match_date": row["match_date"],
         }
         for row in conn.execute("SELECT id, path, match_date FROM matches").fetchall()
+        if _is_supported_batch(row["match_date"] or parse_match_batch(row["path"]))
     }
-    player_rows = conn.execute("SELECT * FROM players ORDER BY match_id, rank").fetchall()
+    player_rows = [
+        row
+        for row in conn.execute("SELECT * FROM players ORDER BY match_id, rank").fetchall()
+        if int(row["match_id"]) in match_meta
+    ]
     kept_player_ids = {int(row["id"]) for row in player_rows if int(row["id"]) not in bot_ids}
     match_id_by_player = {
         int(row["id"]): int(row["match_id"])
@@ -224,7 +248,7 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
     if kept_player_ids:
         card_rows = conn.execute(
             """
-            SELECT player_id, card_name, slot_index
+            SELECT player_id, card_name, slot_index, card_source
             FROM cards
             WHERE player_id IN ({})
             ORDER BY player_id, slot_index
@@ -248,6 +272,7 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
                     "match_path": meta.get("path"),
                     "match_batch": meta.get("match_date")
                     or parse_match_batch(meta.get("path")),
+                    "source": row["card_source"],
                 }
             )
             resolve_player_ids.append(player_id)
@@ -329,12 +354,43 @@ def _add_avg_appearances_per_match(
         row["avg_appearances_per_match"] = round(appearances / total_matches, 3)
 
 
-def _db_quality(conn: sqlite3.Connection, bot_ids: set[int]) -> dict[str, int]:
+def _db_quality(
+    conn: sqlite3.Connection,
+    bot_ids: set[int],
+    match_ids: set[int],
+) -> dict[str, int]:
+    placeholders = ",".join("?" for _ in match_ids) or "NULL"
+    params = tuple(sorted(match_ids))
     return {
-        "matches": int(conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]),
-        "players": int(conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]),
-        "cards": int(conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]),
-        "bot_player_records_excluded": len(bot_ids),
+        "matches": len(match_ids),
+        "players": int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM players WHERE match_id IN ({placeholders})",
+                params,
+            ).fetchone()[0]
+        ),
+        "cards": int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM cards c
+                JOIN players p ON p.id = c.player_id
+                WHERE p.match_id IN ({placeholders})
+                """,
+                params,
+            ).fetchone()[0]
+        ),
+        "bot_player_records_excluded": sum(
+            1
+            for player_id in bot_ids
+            if conn.execute(
+                f"""
+                SELECT 1 FROM players
+                WHERE id = ? AND match_id IN ({placeholders})
+                """,
+                (player_id, *params),
+            ).fetchone()
+        ),
     }
 
 
@@ -348,10 +404,17 @@ def build_card_stats_payload(db_path: Path | str) -> dict[str, Any]:
     conn.row_factory = sqlite3.Row
     try:
         bot_ids = find_bot_player_ids(conn)
-        quality = _db_quality(conn, bot_ids)
         records = _load_player_card_records(conn, bot_ids)
         if not records:
-            raise ValueError(f"No usable player records in DB: {path}")
+            raise ValueError(
+                f"No usable player records on or after {MIN_CARD_STATS_DATE.isoformat()} "
+                f"in DB: {path}"
+            )
+        quality = _db_quality(
+            conn,
+            bot_ids,
+            {record.match_id for record in records},
+        )
 
         total_weight = sum(record.sample_weight for record in records) or 1.0
         baseline = sum(record.rank * record.sample_weight for record in records) / total_weight

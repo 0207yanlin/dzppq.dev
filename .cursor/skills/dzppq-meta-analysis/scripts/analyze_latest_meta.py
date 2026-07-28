@@ -27,6 +27,7 @@ from src.card_rules import (  # noqa: E402
     resolve_card_labels,
     split_card_prefix,
 )
+from src.card_details import CARD_DETAILS_PATH, load_card_details  # noqa: E402
 from src.match_db import ensure_match_schema, parse_match_batch  # noqa: E402
 
 DEFAULT_LATEST_DB = ROOT / "data" / "match_latest.db"
@@ -142,15 +143,31 @@ COMPOSITION_RATE_PRIOR_STRENGTH = 12.0
 BETA_LOWER_BOUND_Z = 1.2815515655446004  # One-sided 90% normal approximation.
 StatItem = tuple[str, int] | tuple[str, int, float]
 CARD_TEMPLATE_DIR = ROOT / "assets" / "templates" / "cards"
+MIN_ANALYSIS_DATE = date(2026, 7, 27)
 MERGED_TEMPLATE_EXPANSIONS: dict[str, list[str]] = {
     "黄·吸吸宝pro快速成型": ["黄·快速成型", "黄·吸吸宝pro"],
-    "蓝·重质拍档支援": ["蓝·拍档支援", "蓝·重质也重量pro"],
-    "蓝·一起刷刷刷+天降啾啾pro": [
-        "蓝·我们全都要+一起刷刷刷",
-        "蓝·天降啾啾pro",
+    "蓝·半步满级+满级玩家": ["蓝·半步满级", "蓝·满级玩家"],
+    "蓝·重质拍档支援": ["蓝·重质也重量pro", "蓝·最佳拍档", "蓝·最强支援"],
+    "蓝·一起刷刷刷+天降揪揪pro": [
+        "蓝·我们全都要",
+        "蓝·一起刷刷刷",
+        "蓝·天降揪揪pro",
     ],
     "黄·巨神兵+迅迅迅捷双剑": ["黄·巨神兵", "黄·迅迅迅捷双剑"],
     "黄·摇盒高手": ["黄·死亡摇滚", "黄·摇盒高手"],
+    "蓝·快速成长": ["蓝·我是老大", "蓝·快速成长"],
+    "蓝·冒险": ["蓝·专业打手", "蓝·冒险"],
+    "蓝·福袋有钱": ["蓝·福袋", "蓝·有钱同享"],
+    "蓝·开攒大亨": ["蓝·开攒", "蓝·大亨"],
+    "蓝·波纹利己": ["蓝·利己主义", "蓝·最后的波纹"],
+    "黄·大力巫术守护": ["黄·大力", "黄·巫术", "黄·守护"],
+    "彩·法师战士射手礼包": ["彩·法师礼包", "彩·坦克礼包", "彩·射手礼包"],
+    "黄·装备共鸣": ["黄·装备共鸣法", "黄·装备共鸣攻", "黄·装备共鸣血"],
+    "彩·装备共鸣pro": [
+        "彩·装备共鸣法pro",
+        "彩·装备共鸣攻pro",
+        "彩·装备共鸣血pro",
+    ],
 }
 LEGACY_CARD_TEMPLATE_NAMES = frozenset(
     {
@@ -164,32 +181,8 @@ CARD_GRANTED_HEROES = {"暴龙虾饺"}
 PLAY_STYLES = ("赌狗", "高费")
 CARD_PREFIX_TYPES = ("彩", "黄", "蓝", "白", "其他")
 CARD_MERGE_NOTES: dict[str, str] = {
-    "蓝": (
-        "蓝卡同图标规则："
-        "福袋，有钱同享 -> 福袋有钱；"
-        "最佳拍档，最强支援 -> 拍档支援；"
-        "最后的波纹，利己主义 -> 波纹利己；"
-        "开攒，大亨 -> 开攒大亨；"
-        "我们全都要，一起刷刷刷 -> 我们全都要+一起刷刷刷；"
-        "我是老大，快速成长 -> 我是老大+快速成长；"
-        "专业打手，冒险 -> 专业打手+冒险。"
-        "我们全都要/一起刷刷刷与天降啾啾pro虽共用图标，"
-        "仍按最终阵容啾啾装备数量分别统计。"
-    ),
-    "彩": (
-        "以下卡牌因图标完全相同做了合并处理："
-        "法师礼包，战士礼包，射手礼包 -> 法师战士射手礼包。"
-    ),
-    "黄": (
-        "以下卡牌因图标完全相同做了合并处理："
-        "大力，巫术，守护 -> 大力巫术守护。"
-        "巨神兵与迅迅迅捷双剑虽共用图标，已按最终阵容巨神兵之斧/迅捷双剑数量分别统计："
-        "仅斧 -> 巨神兵，仅剑 -> 迅迅迅捷双剑，都有则数量占优；"
-        "数量相同则按本次数据库明确样本比例并以固定种子可复现分配。"
-        "死亡摇滚与摇盒高手共用摇盒高手模板并分别统计：仅 screenshots.0723 起，"
-        "最终阵容有吉他手卡萝 -> 死亡摇滚，无吉他手卡萝 -> 摇盒高手；"
-        "更早批次一律为摇盒高手。"
-    ),
+    prefix: "自 2026-07-27 起，共用图标卡牌均按详情 OCR 确认的具体卡名独立统计。"
+    for prefix in ("蓝", "彩", "黄")
 }
 
 HERO_ALIASES = {
@@ -344,6 +337,24 @@ def ordered_batches(
 ) -> list[str]:
     batches = {feature.match_batch for feature in features if feature.match_batch}
     return sorted(batches, key=lambda batch: batch_ordinal(batch, reference_date))
+
+
+def filter_features_since_date(
+    features: Iterable[PlayerFeature],
+    start_date: date,
+    *,
+    reference_date: date | None = None,
+) -> list[PlayerFeature]:
+    """Keep records whose inferred screenshot date is on/after a hard cutoff."""
+    return [
+        feature
+        for feature in features
+        if (
+            (batch_date := infer_batch_date(feature.match_batch, reference_date))
+            is not None
+            and batch_date >= start_date
+        )
+    ]
 
 
 def filter_features_by_lookback(
@@ -516,6 +527,7 @@ def card_prefix_type(card_name: str) -> str:
 
 
 def load_report_card_catalog() -> dict[str, list[str]]:
+    """Union real workbook names with legacy reporting keys."""
     by_prefix: dict[str, set[str]] = {
         prefix: set() for prefix in CARD_PREFIX_TYPES if prefix != "其他"
     }
@@ -534,6 +546,15 @@ def load_report_card_catalog() -> dict[str, list[str]]:
             prefix = card_prefix_type(name)
             if prefix in by_prefix:
                 by_prefix[prefix].add(name)
+
+    try:
+        details = load_card_details(CARD_DETAILS_PATH, template_dir=CARD_TEMPLATE_DIR)
+    except (OSError, ValueError):
+        pass
+    else:
+        for prefix in by_prefix:
+            by_prefix[prefix].update(details.by_color.get(prefix, {}))
+
     return {prefix: sorted(names) for prefix, names in by_prefix.items()}
 
 
@@ -1389,6 +1410,7 @@ def load_player_features(
             c.player_id,
             c.card_name,
             c.slot_index,
+            c.card_source,
             m.path AS match_path,
             m.match_date AS match_batch
         FROM cards c
@@ -1424,6 +1446,7 @@ def load_player_features(
                 "heroes": hero_context,
                 "path": match_path,
                 "batch": match_batch,
+                "source": row["card_source"],
             }
         )
         resolve_player_ids.append(player_id)
@@ -4678,10 +4701,23 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
         all_features = load_player_features(conn, bot_ids, dict_character, dict_bond)
         if not all_features:
             raise SystemExit("No usable player records after filtering.")
+        cutoff_features = filter_features_since_date(
+            all_features,
+            MIN_ANALYSIS_DATE,
+        )
+        if not cutoff_features:
+            raise SystemExit(
+                "No usable player records on or after "
+                f"{MIN_ANALYSIS_DATE.isoformat()}."
+            )
         lookback_days = getattr(args, "lookback_days", DEFAULT_LOOKBACK_DAYS)
         features, analysis_window = filter_features_by_lookback(
-            all_features,
+            cutoff_features,
             lookback_days,
+        )
+        analysis_window["hard_start_date"] = MIN_ANALYSIS_DATE.isoformat()
+        analysis_window["pre_cutoff_excluded_players"] = (
+            len(all_features) - len(cutoff_features)
         )
         if not features:
             raise SystemExit("No usable player records in the analysis lookback window.")
@@ -5931,7 +5967,7 @@ def render_md(data: dict[str, Any]) -> str:
         "发现门槛仍为 min_comp_apps=5。"
     )
     lines.append(
-        "- 蓝卡 `一起刷刷刷` 与 `天降啾啾pro` 共用图标，但按最终阵容啾啾装备数（>=2 为 pro）分别统计，"
+        "- 蓝卡 `一起刷刷刷` 与 `天降揪揪pro` 共用图标，但按最终阵容啾啾装备数（>=2 为 pro）分别统计，"
         "不再合并为同一排行项。"
     )
     lines.append(

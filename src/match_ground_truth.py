@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -13,7 +14,18 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.card_rules import resolve_card_label
+from src.card_rules import (
+    normalize_card_label,
+    resolve_card_label,
+    uses_concrete_card_labels,
+)
+from src.card_sidecar import (
+    CardSidecarError,
+    card_sidecar_path,
+    card_sidecar_to_cards_by_player,
+    load_card_sidecar,
+    load_card_sidecar_fingerprint,
+)
 from src.template_capture import imread_image
 from src.detect_cards import detect_cards, load_template_sigs
 from src.detect_equipment import (
@@ -145,8 +157,6 @@ def merge_prediction(
         pair_info = detect_pairs(img)
     if hero_templates is None:
         hero_templates = load_templates()
-    if card_sigs is None:
-        card_sigs = load_template_sigs()
     if equipment_templates is None:
         equipment_templates = load_equipment_templates()
 
@@ -155,6 +165,8 @@ def merge_prediction(
     if stars_by_player is None:
         stars_by_player = detect_stars(img)
     if cards_by_player is None:
+        if card_sigs is None:
+            card_sigs = load_template_sigs()
         cards_by_player = detect_cards(img, card_sigs)
 
     if equipment_counts is None:
@@ -208,24 +220,39 @@ def merge_prediction(
                 )
             )
 
-        cards_out = [
-            {
-                "slot_index": card["slot_index"],
-                "card_name": resolve_card_label(
+        cards_out: list[dict[str, Any]] = []
+        for card in card_row["cards"]:
+            if card.get("is_ground_truth"):
+                # A detail-confirmed label is authoritative.  In particular it
+                # must not pass through context-sensitive hard-coded rewrites.
+                card_name = str(card["label"])
+            elif card.get("from_sidecar"):
+                raw_label = str(card["label"])
+                card_name = (
+                    raw_label
+                    if uses_concrete_card_labels(
+                        str(match_path) if match_path is not None else None,
+                        match_batch,
+                    )
+                    else normalize_card_label(raw_label)
+                )
+            else:
+                card_name = resolve_card_label(
                     card["label"],
                     int(card["slot_index"]),
                     heroes_out,
                     match_path=str(match_path) if match_path is not None else None,
                     match_batch=match_batch,
-                ),
-                **(
-                    {"score": float(card.get("score", 0.0))}
-                    if card.get("score") is not None
-                    else {}
-                ),
+                )
+            output_card: dict[str, Any] = {
+                "slot_index": card["slot_index"],
+                "card_name": card_name,
             }
-            for card in card_row["cards"]
-        ]
+            if card.get("score") is not None:
+                output_card["score"] = float(card["score"])
+            if card.get("source") is not None:
+                output_card["source"] = card["source"]
+            cards_out.append(output_card)
 
         rank = row_index + 1
         players.append(
@@ -260,10 +287,19 @@ def compute_template_metadata() -> dict[str, dict[str, int | float]]:
     }
 
 
-def prediction_cache_valid(entry: dict | None, template_metadata: dict) -> bool:
-    if not entry or entry.get("verified"):
+def prediction_cache_valid(
+    entry: dict | None,
+    template_metadata: dict,
+    card_sidecar_fingerprint: str | None = None,
+) -> bool:
+    if not entry:
         return False
-    return entry.get("template_metadata") == template_metadata
+    if entry.get("verified"):
+        return True
+    return (
+        entry.get("template_metadata") == template_metadata
+        and entry.get("card_sidecar_fingerprint") == card_sidecar_fingerprint
+    )
 
 
 class PredictionContext:
@@ -279,6 +315,7 @@ class PredictionContext:
         rebuild_cache: bool = False,
         search_radius: int = 2,
         verbose: bool = False,
+        ignore_card_sidecar: bool = False,
     ):
         self.equipment_gt_path = equipment_gt_path or DEFAULT_EQUIPMENT_GT_PATH
         self.method = method
@@ -287,6 +324,7 @@ class PredictionContext:
         self.rebuild_cache = rebuild_cache
         self.search_radius = search_radius
         self.verbose = verbose
+        self.ignore_card_sidecar = ignore_card_sidecar
 
         self.hero_templates: dict | None = None
         self.hero_template_gray: dict[str, np.ndarray] | None = None
@@ -298,6 +336,7 @@ class PredictionContext:
         self.model = None
         self.index = None
         self.classifier = None
+        self._card_sigs_lock = threading.Lock()
         self._initialized = False
 
     def _log(self, message: str) -> None:
@@ -311,7 +350,6 @@ class PredictionContext:
         self._log("Loading templates and models...")
         self.hero_templates = load_templates()
         self.hero_template_gray = build_hero_template_cache(self.hero_templates)
-        self.card_sigs = load_template_sigs()
         self.equipment_templates = load_equipment_templates()
         self.equipment_batch_index = build_equipment_batch_index(self.equipment_templates)
         self.template_metadata = compute_template_metadata()
@@ -338,6 +376,19 @@ class PredictionContext:
             )
         self._initialized = True
         self._log(f"Resources loaded in {time.perf_counter() - started:.1f}s.")
+
+    def _load_card_sigs(self) -> dict:
+        if self.card_sigs is None:
+            with self._card_sigs_lock:
+                if self.card_sigs is None:
+                    self._log("Loading card templates...")
+                    self.card_sigs = load_template_sigs()
+        return self.card_sigs
+
+    def card_sidecar_fingerprint(self, img_path: Path) -> str | None:
+        if self.ignore_card_sidecar:
+            return None
+        return load_card_sidecar_fingerprint(img_path)
 
     def predict_equipment_counts(self, img: np.ndarray, screenshot_name: str) -> list[list[dict]]:
         if self.equipment_gt_data is not None:
@@ -387,7 +438,6 @@ class PredictionContext:
             raise RuntimeError(f"failed to read screenshot: {img_path}")
 
         assert self.hero_templates is not None
-        assert self.card_sigs is not None
         assert self.equipment_templates is not None
 
         timings: dict[str, float] = {}
@@ -428,7 +478,20 @@ class PredictionContext:
         timings["stars"] = time.perf_counter() - stage_started
 
         stage_started = time.perf_counter()
-        cards_by_player = detect_cards(img, self.card_sigs)
+        cards_by_player = None
+        if (
+            not self.ignore_card_sidecar
+            and card_sidecar_path(img_path).exists()
+        ):
+            try:
+                sidecar = load_card_sidecar(img_path)
+            except CardSidecarError as exc:
+                self._log(f"Ignoring invalid card sidecar: {exc}")
+            else:
+                cards_by_player = card_sidecar_to_cards_by_player(sidecar)
+                self._log("Using card sidecar.")
+        if cards_by_player is None:
+            cards_by_player = detect_cards(img, self._load_card_sigs())
         timings["cards"] = time.perf_counter() - stage_started
 
         stage_started = time.perf_counter()
@@ -460,6 +523,7 @@ def build_screenshot_entry(
     *,
     verified: bool = False,
     template_metadata: dict | None = None,
+    card_sidecar_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     try:
         rel_path = str(img_path.relative_to(ROOT)).replace("\\", "/")
@@ -476,6 +540,8 @@ def build_screenshot_entry(
     }
     if template_metadata is not None:
         entry["template_metadata"] = template_metadata
+    if card_sidecar_fingerprint is not None:
+        entry["card_sidecar_fingerprint"] = card_sidecar_fingerprint
     return entry
 
 
@@ -495,11 +561,18 @@ def validate_player_record(player: dict) -> None:
         if "slot_index" not in hero or "hero_name" not in hero:
             raise ValueError("hero missing required fields")
     cards = player.get("cards", [])
-    if len(cards) != NUM_CARDS:
-        raise ValueError(f"expected {NUM_CARDS} cards per player")
+    if len(cards) > NUM_CARDS:
+        raise ValueError(f"expected at most {NUM_CARDS} cards per player")
+    seen_card_slots: set[int] = set()
     for card in cards:
         if "slot_index" not in card or "card_name" not in card:
             raise ValueError("card missing required fields")
+        slot_index = card["slot_index"]
+        if not isinstance(slot_index, int) or not 0 <= slot_index < NUM_CARDS:
+            raise ValueError("card slot_index out of range")
+        if slot_index in seen_card_slots:
+            raise ValueError("duplicate card slot_index")
+        seen_card_slots.add(slot_index)
 
 
 def validate_screenshot_entry(entry: dict) -> None:

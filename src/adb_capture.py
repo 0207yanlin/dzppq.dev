@@ -1017,6 +1017,12 @@ class AdbClient:
     def has_cached_png(self) -> bool:
         return bool(self._last_png)
 
+    def cached_png_bytes(self) -> bytes:
+        """Return an immutable copy of the latest screenshot bytes."""
+        if not self._last_png:
+            raise RuntimeError("No cached screenshot is available")
+        return bytes(self._last_png)
+
     def save_cached_png(self, path: Path) -> Path:
         """Write the most recent screenshot without triggering a new screencap."""
         if not self._last_png:

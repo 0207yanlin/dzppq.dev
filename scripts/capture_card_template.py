@@ -48,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Crop a card icon from a match screenshot and save it to "
-            "assets/templates/cards/. Does not modify ground truth."
+            "assets/templates/cards/. Does not modify ground truth. For a shared "
+            "icon, also configure data/card_details.xlsx as documented in README."
         ),
     )
     parser.add_argument(

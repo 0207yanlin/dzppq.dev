@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -68,6 +71,14 @@ from src.adb_capture import (  # noqa: E402
     page_date_summary,
     should_exit_before_target_after_today_done,
 )
+from src.card_capture import capture_cards_runtime  # noqa: E402
+from src.card_details import CARD_DETAILS_PATH, CardDetails, load_card_details  # noqa: E402
+from src.card_sidecar import (  # noqa: E402
+    card_sidecar_path,
+    create_card_sidecar,
+    save_card_sidecar,
+)
+from src.detect_cards import load_template_sigs  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +118,7 @@ class CaptureConfig:
     resume: bool = False
     reset_state: bool = False
     state_path: Path | None = None
+    card_details_workbook: Path = CARD_DETAILS_PATH
 
     def resolved_target_date(self) -> str:
         if self.target_date:
@@ -184,6 +196,7 @@ class CaptureState:
                 "skip_reason": None,
                 "match_ids": [],
                 "saved_paths": [],
+                "sidecar_paths": [],
                 "debug_paths": [],
                 "failure_screenshot": None,
             },
@@ -242,6 +255,63 @@ def default_state_path(output_dir: Path) -> Path:
     return output_dir / "capture_state.json"
 
 
+def save_capture_pair_atomic(
+    png_path: Path,
+    png_bytes: bytes,
+    sidecar: dict,
+) -> tuple[Path, Path]:
+    """Stage and promote one PNG/sidecar pair with rollback on failure."""
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path = card_sidecar_path(png_path)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{png_path.stem}.capture-",
+            dir=png_path.parent,
+        )
+    )
+    staged_png = staging / png_path.name
+    staged_sidecar = staging / sidecar_path.name
+    backup_png = staging / ".previous.png"
+    backup_sidecar = staging / ".previous.cards.json"
+    backed_up_png = False
+    backed_up_sidecar = False
+    promoted_png = False
+    promoted_sidecar = False
+    try:
+        with staged_png.open("wb") as handle:
+            handle.write(png_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        written_sidecar = save_card_sidecar(staged_png, sidecar)
+        if written_sidecar != staged_sidecar:
+            raise RuntimeError("staged sidecar path did not match capture pair")
+
+        try:
+            if png_path.exists():
+                os.replace(png_path, backup_png)
+                backed_up_png = True
+            if sidecar_path.exists():
+                os.replace(sidecar_path, backup_sidecar)
+                backed_up_sidecar = True
+            os.replace(staged_png, png_path)
+            promoted_png = True
+            os.replace(staged_sidecar, sidecar_path)
+            promoted_sidecar = True
+        except Exception:
+            if promoted_sidecar and sidecar_path.exists():
+                sidecar_path.unlink()
+            if promoted_png and png_path.exists():
+                png_path.unlink()
+            if backed_up_png and backup_png.exists():
+                os.replace(backup_png, png_path)
+            if backed_up_sidecar and backup_sidecar.exists():
+                os.replace(backup_sidecar, sidecar_path)
+            raise
+        return png_path, sidecar_path
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 class DailyCaptureBot:
     def __init__(self, config: CaptureConfig) -> None:
         self.config = config
@@ -272,6 +342,8 @@ class DailyCaptureBot:
             end_rank=config.end_rank,
         )
         self._next_expected_rank = max(config.start_rank, 1)
+        self.card_details: CardDetails | None = None
+        self.card_template_sigs: dict | None = None
 
     @property
     def state_path(self) -> Path:
@@ -288,6 +360,11 @@ class DailyCaptureBot:
     @property
     def failures_dir(self) -> Path:
         return self.config.output_dir / "failures"
+
+    def card_review_dir(self, png_stem: str) -> Path:
+        if self.config.dry_run:
+            return self.run_dir / "card_review" / png_stem
+        return self.config.output_dir / "card_review" / png_stem
 
     def should_debug_save_player(self, rank: int) -> bool:
         return (
@@ -321,13 +398,16 @@ class DailyCaptureBot:
         match_id: str,
         *,
         use_cached: bool = True,
+        png_bytes: bytes | None = None,
     ) -> Path | None:
         if not self.should_debug_save_match(rank):
             return None
         out_dir = self.debug_matches_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / self.make_debug_match_filename(rank, match_datetime, duration)
-        if use_cached and self.adb.has_cached_png():
+        if png_bytes is not None:
+            self.adb.save_png(path, png_bytes=png_bytes)
+        elif use_cached and self.adb.has_cached_png():
             self.adb.save_cached_png(path)
         else:
             self.adb.save_png(path)
@@ -552,15 +632,22 @@ class DailyCaptureBot:
         match_id: str,
         *,
         saved_path: str | None = None,
+        sidecar_path: str | None = None,
         debug_path: str | None = None,
     ) -> None:
         record = self.capture_state.get_rank_record(rank)
-        if match_id not in record["match_ids"]:
-            record["match_ids"].append(match_id)
-        if saved_path and saved_path not in record["saved_paths"]:
-            record["saved_paths"].append(saved_path)
-        if debug_path and debug_path not in record["debug_paths"]:
-            record["debug_paths"].append(debug_path)
+        match_ids = record.setdefault("match_ids", [])
+        saved_paths = record.setdefault("saved_paths", [])
+        sidecar_paths = record.setdefault("sidecar_paths", [])
+        debug_paths = record.setdefault("debug_paths", [])
+        if match_id not in match_ids:
+            match_ids.append(match_id)
+        if saved_path and saved_path not in saved_paths:
+            saved_paths.append(saved_path)
+        if sidecar_path and sidecar_path not in sidecar_paths:
+            sidecar_paths.append(sidecar_path)
+        if debug_path and debug_path not in debug_paths:
+            debug_paths.append(debug_path)
         self.save_state()
 
     def check_possible_rank_mismatch(
@@ -596,6 +683,9 @@ class DailyCaptureBot:
         self._rank_fingerprints[rank] = (merged_dates, merged_match_ids)
 
     def run(self) -> CaptureStats:
+        # Validate all non-ADB runtime inputs before connect/check/tap.
+        self.card_details = load_card_details(self.config.card_details_workbook)
+        self.card_template_sigs = load_template_sigs()
         if self.config.auto_connect:
             self.adb.connect(self.config.connect_host, self.config.connect_port)
         self.adb.check_device(self.config.device_serial)
@@ -642,6 +732,7 @@ class DailyCaptureBot:
                     else None
                 ),
                 "state_path": str(self.state_path),
+                "card_details_workbook": str(self.config.card_details_workbook),
             },
             "stats": self.stats.to_dict(),
             "events": self.events,
@@ -1437,7 +1528,9 @@ class DailyCaptureBot:
                 datetime=match_datetime,
             )
             img = self.adb.capture_bgr()
-            duration_raw = self.ocr.ocr_text(img, MATCH_DURATION_BOX)
+            overview_bgr = img.copy()
+            overview_png_bytes = self.adb.cached_png_bytes()
+            duration_raw = self.ocr.ocr_text(overview_bgr, MATCH_DURATION_BOX)
             duration = normalize_match_duration(duration_raw)
             self.log_event(
                 "match_duration_ocr_end",
@@ -1497,6 +1590,26 @@ class DailyCaptureBot:
                     return "duplicate"
                 match_id = fallback_id
 
+            filename = make_mumu_filename()
+            out_path = self.config.output_dir / filename
+            if self.card_details is None or self.card_template_sigs is None:
+                raise RuntimeError("card runtime was not initialized")
+            card_result = capture_cards_runtime(
+                overview_bgr,
+                adb=self.adb,
+                ocr=self.ocr,
+                card_details=self.card_details,
+                template_sigs=self.card_template_sigs,
+                review_dir=self.card_review_dir(out_path.stem),
+            )
+            self.log_event(
+                "card_capture",
+                rank=rank,
+                datetime=match_datetime,
+                match_id=match_id,
+                **card_result.summary,
+            )
+
             self.log_event(
                 "debug_match_save_start",
                 rank=rank,
@@ -1504,7 +1617,12 @@ class DailyCaptureBot:
                 match_id=match_id,
             )
             debug_path = self.save_debug_match_screenshot(
-                rank, match_datetime, duration, match_id, use_cached=True
+                rank,
+                match_datetime,
+                duration,
+                match_id,
+                use_cached=False,
+                png_bytes=overview_png_bytes,
             )
             self.log_event(
                 "debug_match_save_end",
@@ -1512,7 +1630,7 @@ class DailyCaptureBot:
                 datetime=match_datetime,
                 match_id=match_id,
                 debug_path=str(debug_path) if debug_path else None,
-                used_cached=self.adb.has_cached_png(),
+                source="overview_bytes",
             )
 
             if self.config.dry_run:
@@ -1524,6 +1642,7 @@ class DailyCaptureBot:
                     duration=duration,
                     match_id=match_id,
                     debug_path=str(debug_path) if debug_path else None,
+                    card_summary=card_result.summary,
                 )
                 self._processed_match_ids.add(match_id)
                 self.record_rank_match_saved(
@@ -1535,8 +1654,6 @@ class DailyCaptureBot:
                 self.return_from_match(rank, match_datetime)
                 return "saved"
 
-            filename = make_mumu_filename()
-            out_path = self.config.output_dir / filename
             self.log_event(
                 "match_save_start",
                 rank=rank,
@@ -1544,15 +1661,32 @@ class DailyCaptureBot:
                 match_id=match_id,
                 path=str(out_path),
             )
-            if self.adb.has_cached_png():
-                self.adb.save_cached_png(out_path)
-            else:
-                self.adb.save_png(out_path)
+            sidecar = create_card_sidecar(
+                out_path,
+                card_result.slots,
+                capture_metadata={
+                    "run_id": self.run_id,
+                    "source_rank": rank,
+                    "match_datetime": match_datetime,
+                    "duration": duration,
+                    "match_id": match_id,
+                    "dry_run": False,
+                    "workbook": str(self.config.card_details_workbook),
+                },
+                summary=card_result.summary,
+                review_artifacts=card_result.review_artifacts or None,
+            )
+            _, sidecar_path = save_capture_pair_atomic(
+                out_path,
+                overview_png_bytes,
+                sidecar,
+            )
             self._processed_match_ids.add(match_id)
             self.record_rank_match_saved(
                 rank,
                 match_id,
                 saved_path=str(out_path),
+                sidecar_path=str(sidecar_path),
                 debug_path=str(debug_path) if debug_path else None,
             )
             self.check_possible_rank_mismatch(rank, [], {match_id})
@@ -1563,6 +1697,8 @@ class DailyCaptureBot:
                 duration=duration,
                 match_id=match_id,
                 path=str(out_path),
+                sidecar_path=str(sidecar_path),
+                card_summary=card_result.summary,
             )
             self.return_from_match(rank, match_datetime)
             return "saved"
@@ -1649,6 +1785,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory (default: screenshots.MMDD).",
     )
     parser.add_argument("--adb-bin", default=DEFAULT_ADB_BIN)
+    parser.add_argument(
+        "--card-details-workbook",
+        type=Path,
+        default=CARD_DETAILS_PATH,
+        help="Validated card detail workbook (default: data/card_details.xlsx).",
+    )
     parser.add_argument("--serial", default=None, help="ADB device serial.")
     parser.add_argument("--connect", action="store_true", help="Run adb connect before capture.")
     parser.add_argument("--connect-host", default="127.0.0.1")
@@ -1726,6 +1868,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
         reset_state=args.reset_state,
         state_path=args.state,
+        card_details_workbook=args.card_details_workbook,
     )
 
     try:

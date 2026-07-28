@@ -103,7 +103,7 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - Strength ranking: `overall_strength_score()` and `merge_comp_strategies()`.
 - Cross-strategy contest and low-cost 3-star difficulty: `enrich_three_star_contest()`.
 - Excel export: `render_xlsx()` and `write_outputs()`.
-- Card logic: `analyze_cards()` with prefix-type grouping via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`. `蓝·一起刷刷刷` / `蓝·天降啾啾pro` are disambiguated by final-board jiujiu count, not merged in rankings. `黄·巨神兵` / `黄·迅迅迅捷双剑` are disambiguated via `resolve_jsb_xj_card_labels()` (axe/sword equipment majority, then seeded clear-sample ratio for ties).
+- Card logic: analysis is hard-limited to 2026-07-27 and later. `analyze_cards()` groups by prefix type via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`, while preserving every detail-OCR-confirmed shared-icon card as its own concrete ranking key. Final-board hero/equipment inference and legacy merged keys must not rewrite 0727+ labels. The `蓝·半步满级` / `蓝·满级玩家` shared template was not detail-captured in 0727, so those slots remain `unknown` until collection starts in 0728.
 - Jiujiu logic: `analyze_jiujiu()`.
 - Super / food equipment ranking: `analyze_special_equipment()`, `is_super_equipment()`, `is_food_equipment()`, `equipment_kind()`.
 - Duo composition synergy: `analyze_duo_composition_synergy()`.

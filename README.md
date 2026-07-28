@@ -117,7 +117,8 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py --db da
 
 ## 0b. 一键批次处理 — `process_match_batch.py`
 
-截图采集完成后的推荐入口。固定使用 `data/match_ground_truth.json` 与 `data/match_latest.db`，按批次目录 `screenshots.MMDD/` 依次执行：
+截图采集完成后的推荐入口。固定使用 `data/match_ground_truth.json`，数据库默认写入
+`data/match_latest.db`，也可用 `--db` 指向临时库；按批次目录 `screenshots.MMDD/` 依次执行：
 
 1. `label_match_ground_truth.py --workers 4 label --all --no-review`（并行预测并保存为未验证，不进入交互校正）
 2. `build_match_database.py --path-prefix screenshots.MMDD/ --db data/match_latest.db --force`（不重复预测）
@@ -138,6 +139,9 @@ python scripts/process_match_batch.py --batch 0705
 # 调整标注预测并行度
 python scripts/process_match_batch.py --batch 0705 --workers 8
 
+# 安全重建到全新临时库
+python scripts/process_match_batch.py --batch 0727 --db data/match_0727_rebuild.db
+
 # 只打印将要执行的命令，不真正跑
 python scripts/process_match_batch.py --batch 0705 --dry-run
 ```
@@ -148,6 +152,7 @@ python scripts/process_match_batch.py --batch 0705 --dry-run
 |------|------|------|
 | `--batch` | 今天的 `MMDD` | 对应 `screenshots.MMDD/` |
 | `--workers` | `4` | 传给标注脚本的预测预取并行数 |
+| `--db` | `data/match_latest.db` | 入库和环境分析使用的 SQLite，可指向临时库 |
 | `--dry-run` | 关 | 只打印子命令，不执行 |
 
 默认产物：更新后的 `data/match_ground_truth.json`、`data/match_latest.db`，以及环境分析相关文件（见下方「环境分析报告」一节）。
@@ -160,6 +165,95 @@ python scripts/process_match_batch.py --batch 0705 --dry-run
 
 滚动区 ROI 同时完整识别到连续两名玩家时，处理第一名并返回排行榜后不会滑动，而是直接处理第二名；第二名完成后再滑动。只有 OCR 精确识别到下一排名才会连续处理，例如 `[23, 24]` 可直接处理 24，而下一行未完全显示导致结果为 `[23, 4]` 时会先滑动，不会把 4 误当作 24。
 
+### 卡牌详情工作簿与采集
+
+`data/card_details.xlsx` 固定包含 `白`、`蓝`、`黄`、`彩`、`同模板组合` 五个 sheet。四色 sheet 的两列是 `卡牌名称`、`文字详情`；`同模板组合` 的两列是 `模板名称`、`卡牌列表`，其中模板名称填写 `assets/templates/cards/*.jpg` 的文件名 stem（不含 `.jpg`），卡牌列表填写至少两个完整卡名组成的 JSON 数组，例如 `["蓝·候选甲", "黄·候选乙"]`。
+
+手工新增共享模板时，在 `同模板组合` 增加一行，并在各候选颜色 sheet 中增加对应的完整卡名和文字详情；卡名须带 `白·` / `蓝·` / `黄·` / `彩·` 前缀，跨色同名候选尤其需要填写可区分的文字详情。保存工作簿后，下次启动采集脚本时即重新加载并生效。也可初始化或同步工作簿：
+
+```powershell
+python scripts/init_card_details_workbook.py
+```
+
+默认同步保留手工详情和自定义组合，并补入内置组合。`--force` 会用内置组合替换整个 `同模板组合` sheet，删除自定义组合；仅由这些组合引入的候选详情行也会从重建后的四色 sheet 消失，使用前应备份工作簿。
+
+采集先把卡槽分为 `occupied`、`empty`、`uncertain`：只有 `occupied` 且模板匹配的原始 asset stem 存在于工作簿 `同模板组合` 时，才点击卡牌并 OCR 悬浮详情；`empty` / `uncertain` 均不点击。详情面板中的名称不带颜色前缀；跨色同名先按名称缩小范围，再靠 `文字详情` 唯一确认。确认失败记为 `unknown`，并在 `screenshots.MMDD/card_review/` 保存复核裁剪。
+
+每张 `foo.png` 对应同目录 `foo.cards.json`，记录完整 8×3 卡槽。GT 预测默认优先使用有效 sidecar 中的卡牌结果，再回退离线模板识别；已人工验证的 GT 仍保持不变。详情 OCR 确认的卡牌会以 `source=detail_ocr` 写入 GT 和 SQLite 的 `cards.card_source`，统计、报告和规范化流程会保留其真实名称，不再应用旧的上下文硬编码规则；历史记录的来源为空，继续沿用原规则。需要忽略 sidecar 并强制走离线卡牌识别时：
+
+```powershell
+python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0727 predict --ignore-card-sidecar
+```
+
+`capture_state.json` 的每个 rank 记录会在 `sidecar_paths` 中保存已写入的 sidecar 路径。采集可通过 `--card-details-workbook PATH` 改用其他工作簿。
+
+### 共享卡牌模板开发
+
+共享模板指“同一个 JPG 图标对应多个游戏内卡名”。它与 `src/detect_cards.py` 的
+`VISUAL_CARD_GROUPS` 不同：后者用于多个不同 JPG 之间的形状/颜色消歧，不会触发详情 OCR。
+
+数据流如下：
+
+```text
+assets/templates/cards/{stem}.jpg
+  + data/card_details.xlsx（同模板组合、四色详情）
+  → 模板匹配取得 top1_raw_asset_stem
+  → 点击详情并 OCR 唯一卡名
+  → *.cards.json（source=detail_ocr）
+  → match_ground_truth.json → match_latest.db
+  → 环境分析 → 三选一推荐器 → EXE
+```
+
+新增共享组合时按以下顺序处理：
+
+1. 确认 `assets/templates/cards/{stem}.jpg` 已存在；`stem` 必须与工作簿“模板名称”完全一致。
+2. 在 `data/card_details.xlsx` 的 `同模板组合` 增加 `stem` 和至少两个带颜色前缀的具体卡名。
+3. 在 `白` / `蓝` / `黄` / `彩` sheet 为每个具体卡名补充详情；名称相似或跨色同名时，详情必须足以唯一识别。
+4. 将仓库内置组合加入 `src/card_catalog.py` 的 `DEFAULT_SAME_TEMPLATE_GROUPS`，再运行
+   `python scripts/init_card_details_workbook.py`。该常量用于团队默认、工作簿同步和测试，不能代替正式工作簿。
+5. 若 JPG stem 是复合名称，或报告在工作簿缺失时仍需展开候选，同步
+   `.cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py` 的
+   `MERGED_TEMPLATE_EXPANSIONS`。
+6. 将新增的具体卡名加入 `src/card_pick_recommend.py` 的 `LOGICAL_CARD_KEYS`，使推荐器在零样本阶段也能 OCR 匹配并显示“暂无统计”。
+7. 发布推荐 EXE 时，把具体卡名加入
+   `scripts/build_card_pick_recommender_exe.py` 的 `REQUIRED_CONCRETE_CARD_KEYS`。
+   若本次拆除了旧合并统计键，再把旧键加入 `STALE_MERGED_RANKING_KEYS`。
+8. 小范围采集并检查 sidecar：共享模板必须输出某个具体卡名和 `source=detail_ocr`；
+   无法唯一确认时必须为 `unknown`，不得回退为组合 stem。
+9. 运行 `python scripts/process_match_batch.py --batch MMDD`，刷新 GT、数据库和分析产物；
+   发布时再执行 `python scripts/build_card_pick_recommender_exe.py --clean`。
+
+各配置并非每次都要修改：
+
+| 配置 | 何时修改 |
+|------|----------|
+| JPG、工作簿 `同模板组合`、四色详情 | 每个共享组合必改 |
+| `DEFAULT_SAME_TEMPLATE_GROUPS` | 仓库正式内置组合必改；纯本地临时组合可不改 |
+| `MERGED_TEMPLATE_EXPANSIONS` | 复合 stem、无工作簿报告回退或历史拆分时修改 |
+| `CARD_LABEL_ALIASES` | 只用于稳定别名、OCR 变体或历史归一；0727+ 具体卡不应互相合并 |
+| `OCR_EXACT_QUERY_ALIASES` | 三选一卡名 OCR 有稳定错字时修改 |
+| `LOGICAL_CARD_KEYS` | 新增具体卡名时修改，保证零样本可识别 |
+| `REQUIRED_CONCRETE_CARD_KEYS` | 发布推荐 EXE 时修改 |
+| `STALE_MERGED_RANKING_KEYS` | 退役旧合并排行键时修改 |
+| 0727 backfill / GT normalize 脚本 | 仅清理已入库历史数据时修改 |
+
+sidecar、`data/match_ground_truth.json`、`data/match_latest.db`、元分析报告以及
+`dist/` 内数据都是生成物，不应手工逐项改名。历史清理应先改 sidecar/GT 的来源数据，再重建 DB 和报告。
+
+批次以 `screenshots.MMDD/` 路径为准，不以 PNG 文件名中的截图时间为准。通常
+`screenshots.0727` 起只保留详情 OCR 的具体卡名；若某个共享模板在启用日尚未采集详情，
+应把该批次相关槽位回退为 `unknown`，在文档中注明首个有效批次，并从下一批重新采集。
+
+建议验证：
+
+```powershell
+python -c "from src.card_details import validate_card_details_workbook; validate_card_details_workbook(); print('OK')"
+python -m pytest scripts/test_card_details.py scripts/test_card_capture_detection.py scripts/test_card_capture_runtime.py -q
+python -m pytest scripts/test_detect_cards.py scripts/test_card_sidecar_ground_truth.py -q
+python -m pytest scripts/test_meta_report_contracts.py -q -k card
+python -m pytest scripts/test_card_pick_recommender.py -q
+```
+
 ### UI 版本更新校准
 
 游戏改版后若入口位置变化，按以下顺序同步：
@@ -168,6 +262,8 @@ python scripts/process_match_batch.py --batch 0705 --dry-run
 2. 将常量 promote 到 `src/adb_capture.py`（`PROFILE_PARTY_REVIEW_ENTRY_BOX`、`TAP_PROFILE_PARTY_REVIEW`）
 3. 运行 `python -m pytest scripts/test_capture_daily_screenshots.py -q`
 4. 小范围 dry-run：`python scripts/capture_daily_screenshots.py --connect --start-rank 1 --end-rank 5 --dry-run --debug-save-top-players 5 --verbose`
+
+真机启用卡牌详情采集前，还需按设备分辨率 / 缩放校准 `src/layout.py` 中的卡槽 ROI 与点击中心、详情名称 / 文字 ROI，校准 `src/detect_cards.py` 的三态 presence 阈值，并确认点击后详情面板已经稳定显示再截图 OCR。
 
 ### 常用命令
 
@@ -199,6 +295,7 @@ python scripts/capture_daily_screenshots.py --connect --skip-players data/captur
 | `--output` | `screenshots.MMDD/` | 输出目录 |
 | `--connect` | 关 | 运行前执行 `adb connect` |
 | `--serial` | 自动 | 多设备时指定 serial |
+| `--card-details-workbook` | `data/card_details.xlsx` | 卡牌详情与同模板组合工作簿 |
 | `--start-rank` / `--end-rank` | `1` / `100` | 排行榜范围 |
 | `--skip-players` | 无 | 手动跳过 rank 列表 JSON |
 | `--resume` / `--reset-state` | 关 | 断点续跑 / 重置状态 |
@@ -210,8 +307,10 @@ python scripts/capture_daily_screenshots.py --connect --skip-players data/captur
 ### 产物位置
 
 - `screenshots.MMDD/*.png` — 对局截图
+- `screenshots.MMDD/*.cards.json` — 与 PNG 同 stem 的卡牌 sidecar
+- `screenshots.MMDD/card_review/` — 未确认或 uncertain 卡槽的复核裁剪
 - `screenshots.MMDD/failures/*.png` — rank 处理失败时的现场截图
-- `screenshots.MMDD/capture_state.json` — 断点状态（隐藏派对回顾记为 `skip_reason=private_party_review`）
+- `screenshots.MMDD/capture_state.json` — 断点状态（含 `sidecar_paths`；隐藏派对回顾记为 `skip_reason=private_party_review`）
 - `screenshots.MMDD/capture_log.json` — 完整日志
 - `screenshots.MMDD/latest_capture_log.json` — 最近一次运行日志
 - `screenshots.MMDD/runs/<run_id>/capture_log.json` — 单次运行日志
@@ -282,25 +381,20 @@ python scripts/label_match_ground_truth.py --screenshot-dir screenshots.0705 lab
 
 ### 卡牌同图标歧义
 
-识别分两层，职责不同：
+从 `screenshots.0727` 起，共用图标卡牌由详情 OCR 区分，sidecar、GT、数据库、环境分析和
+三选一推荐器都保留具体卡名。0727 以前的阵容/装备推断规则仅用于历史数据，不进入当前统计。
+`蓝·半步满级` / `蓝·满级玩家` 的共享模板在 0727 未采集详情，因此该组 0727 槽位统一为
+`unknown`，从 `screenshots.0728` 起按两个具体卡名收集和统计。
 
 | 层 | 位置 | 作用 |
 |----|------|------|
-| 图像级 | `src/detect_cards.py` 的 `VISUAL_CARD_GROUPS` | 近图标靠形状/颜色救援；完全相同图标会先规范为同一待判定标签 |
-| 装备上下文 | `src/card_rules.py` 的 `resolve_card_label` / `resolve_jsb_xj_card_labels` | 用最终阵容装备（或其它上下文）消解到规范卡名 |
+| 图像级 | `src/detect_cards.py` | 识别共用模板并取得候选卡组 |
+| 详情级 | `src/card_capture.py` + `data/card_details.xlsx` | 点击卡牌后按名称/文字详情确认唯一具体卡名 |
+| 数据级 | sidecar → GT → SQLite | 0727+ 原样保留详情确认结果，不再合并或按最终阵容猜测 |
 
-**黄卡 `巨神兵` / `迅迅迅捷双剑`：** 图标完全一致。模板匹配先输出合并标签 `黄·巨神兵+迅迅迅捷双剑`；统计加载时再按最终阵容装备消歧：
-
-1. 仅有 `巨神兵之斧`（含 `核选` 前缀）→ `黄·巨神兵`
-2. 仅有 `迅捷双剑` → `黄·迅迅迅捷双剑`
-3. 两者都有 → 数量占优
-4. 数量相同（含都为 0）→ 按本次完整对局库中规则 1–3 明确样本比例，以固定种子可复现分配；无明确样本时回退 1:1
-
-同类先例：蓝卡 `我们全都要` / `一起刷刷刷` 先合并为一个统计项，再与
-`天降啾啾pro` 按啾啾装备数拆分（最终阵容中啾啾装备数 `>= 2` 归入 pro）。
-此外，`我是老大` / `快速成长`、`专业打手` / `冒险` 分别使用合并统计。
-
-规则或模板变更后，需对相关批次重新 `predict --write`，必要时跑 `normalize_card_ground_truth.py`，再重建 SQLite；环境分析与桌面推荐器在读库时统一走上述消歧，**不会**把随机分配结果回写 GT。
+`蓝·开攒` / `蓝·大亨`、`蓝·利己主义` / `蓝·最后的波纹`、SSS、QUALITY、
+FAST/XXB、礼包、装备共鸣、`巨神兵` / `迅迅迅捷双剑` 等均独立统计。详情无法稳定确认时写
+`unknown` 并保留 review artifact，不使用旧合并键或上下文猜测。
 
 ---
 
@@ -403,12 +497,10 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 
 ### 桌面三选一卡牌推荐器
 
-推荐器通过界面文字 OCR 匹配逻辑卡名，再从最新 DB（不可用时回退 JSON）读取指标。共享模板按以下方式展示：
-
-- `黄·大力`、`黄·巫术`、`黄·守护` 保留 OCR 识别出的实际卡名，但共同读取 `黄·大力巫术守护` 指标，并标注“共享统计”。
-- SSS 中 `我们全都要` / `一起刷刷刷` 使用合并统计，并与 `天降啾啾pro` 按啾啾装备数消歧；`我是老大` / `快速成长`、`专业打手` / `冒险` 也分别使用合并统计。推荐器保留 OCR 识别出的实际卡名并标注“共享统计”。
-- FAST/XXB、QUALITY、JSB/XJ、死亡摇滚/摇盒高手等可消歧共享模板按各自逻辑卡名匹配和统计；catalog 中已有但暂时为零样本的卡显示“暂无统计”。
-- `开赞` / `蓝·开赞` / `开攒` 仅在推荐器查询层纠正为 `蓝·开攒大亨`，不会改写统计 canonical 数据；`天降啾啾` 可查询 `蓝·天降啾啾pro`。
+推荐器通过界面文字 OCR 匹配具体卡名，再从仅含 0727+ 数据的最新 DB（不可用时回退
+JSON）读取该卡自己的指标。所有共用图标卡牌均直接比较具体统计，不再显示或读取“共享统计”。
+catalog 中已有但暂时为零样本的具体卡显示“暂无统计”。查询层只保留 OCR 拼写纠正，例如
+`开赞` / `开揽` → `蓝·开攒`、`天降啾啾pro` → `蓝·天降揪揪pro`。
 
 发布 EXE 必须 clean rebuild，禁止复用旧 `dist` 数据。先刷新 `data/match_latest.db` 与
 `data/latest_meta_analysis.json`，再执行：

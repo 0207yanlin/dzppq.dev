@@ -1,0 +1,6 @@
+2026-07-28 19:57:03,536 INFO Loading card stats from DB: D:\dzppq.dev\dist\DZPPQCardRecommender\data\match_latest.db
+2026-07-28 19:57:03,787 INFO Card stats loaded from D:\dzppq.dev\dist\DZPPQCardRecommender\data\match_latest.db (db, matches=120, cards=2844)
+2026-07-28 19:57:03,787 INFO Started from D:\dzppq.dev\dist\DZPPQCardRecommender (frozen=True)
+2026-07-28 19:57:03,789 INFO 运行: exe | 构建: 2026-07-28 19:54
+2026-07-28 19:57:04,258 INFO OCR backend: rapidocr (use_cls=False)
+2026-07-28 19:57:05,686 INFO OCR warmup completed (backend=rapidocr, 2091 ms)

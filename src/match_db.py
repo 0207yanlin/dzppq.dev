@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS cards (
     player_id   INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     slot_index  INTEGER NOT NULL CHECK(slot_index BETWEEN 0 AND 2),
     card_name   TEXT NOT NULL,
-    card_score  REAL
+    card_score  REAL,
+    card_source TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date);
@@ -98,17 +99,24 @@ def parse_match_batch(path: str | None, captured_at: str | None = None) -> str |
 
 
 def ensure_match_schema(conn: sqlite3.Connection) -> None:
-    columns = {
+    match_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
     }
-    if "match_date" not in columns:
+    if "match_date" not in match_columns:
         conn.execute("ALTER TABLE matches ADD COLUMN match_date TEXT")
-        conn.commit()
+    card_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()
+    }
+    if "card_source" not in card_columns:
+        conn.execute("ALTER TABLE cards ADD COLUMN card_source TEXT")
+    conn.commit()
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date)"
     )
+    captured_at_expr = "captured_at" if "captured_at" in match_columns else "NULL"
     rows = conn.execute(
-        "SELECT id, path, captured_at, match_date FROM matches WHERE match_date IS NULL"
+        f"SELECT id, path, {captured_at_expr}, match_date "
+        "FROM matches WHERE match_date IS NULL"
     ).fetchall()
     for match_id, path, captured_at, _ in rows:
         batch = parse_match_batch(path, captured_at)
@@ -338,21 +346,25 @@ def _reconstruct_entry_from_db(conn: sqlite3.Connection, match_id: int) -> dict[
                 (player_id,),
             )
         ]
-        cards = [
-            {
+        cards: list[dict[str, Any]] = []
+        for slot_index, card_name, card_score, card_source in conn.execute(
+            """
+            SELECT slot_index, card_name, card_score, card_source
+            FROM cards
+            WHERE player_id = ?
+            ORDER BY slot_index
+            """,
+            (player_id,),
+        ):
+            card = {
                 "slot_index": slot_index,
                 "card_name": card_name,
             }
-            for slot_index, card_name in conn.execute(
-                """
-                SELECT slot_index, card_name
-                FROM cards
-                WHERE player_id = ?
-                ORDER BY slot_index
-                """,
-                (player_id,),
-            )
-        ]
+            if card_score is not None:
+                card["score"] = card_score
+            if card_source is not None:
+                card["source"] = card_source
+            cards.append(card)
         players.append(
             {
                 "rank": rank,
@@ -549,14 +561,16 @@ def insert_match_entry(conn: sqlite3.Connection, screenshot_name: str, entry: di
         for card in player.get("cards", []):
             conn.execute(
                 """
-                INSERT INTO cards (player_id, slot_index, card_name, card_score)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO cards
+                    (player_id, slot_index, card_name, card_score, card_source)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     player_id,
                     card["slot_index"],
                     card["card_name"],
                     card.get("score"),
+                    card.get("source"),
                 ),
             )
 

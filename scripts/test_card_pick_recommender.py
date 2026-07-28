@@ -23,8 +23,9 @@ from src.card_pick_recommend import (  # noqa: E402
     fuzzy_match_card,
     format_recommendation,
 )
+from src.card_stats_db import build_card_stats_payload  # noqa: E402
 from src.layout import HAND_CARD_BOXES, hand_card_roi  # noqa: E402
-from src.match_db import init_match_db, insert_match_entry  # noqa: E402
+from src.match_db import import_ground_truth, init_match_db, insert_match_entry  # noqa: E402
 from src.runtime_paths import (  # noqa: E402
     MATCH_DB_NAME,
     app_base_dir,
@@ -70,7 +71,7 @@ def _sample_stats() -> CardStatsIndex:
                             "avg_appearances_per_match": 0.4,
                         },
                         {
-                            "key": "蓝·福袋有钱",
+                            "key": "蓝·福袋",
                             "appearances": 196,
                             "adjusted_avg_rank": 3.67,
                             "avg_rank": 3.67,
@@ -88,7 +89,7 @@ def _sample_stats() -> CardStatsIndex:
                             "appearances": 173,
                         },
                         {
-                            "key": "蓝·福袋有钱",
+                            "key": "蓝·福袋",
                             "avg_rank": 2.12,
                             "team_top2_rate": 61.7,
                             "appearances": 196,
@@ -101,21 +102,43 @@ def _sample_stats() -> CardStatsIndex:
     return CardStatsIndex(payload)
 
 
-def _merged_card_stats() -> CardStatsIndex:
-    """Stats with all merged-card canonical keys for alias matching tests."""
+def _concrete_card_stats() -> CardStatsIndex:
+    """Stats with 0727+ concrete shared-icon card keys."""
     base_keys = {
         "蓝": [
-            "蓝·拍档支援",
-            "蓝·我们全都要+一起刷刷刷",
-            "蓝·天降啾啾pro",
-            "蓝·我是老大+快速成长",
-            "蓝·专业打手+冒险",
-            "蓝·开攒大亨",
-            "蓝·福袋有钱",
-            "蓝·波纹利己",
+            "蓝·重质也重量pro",
+            "蓝·最佳拍档",
+            "蓝·最强支援",
+            "蓝·我们全都要",
+            "蓝·一起刷刷刷",
+            "蓝·天降揪揪pro",
+            "蓝·我是老大",
+            "蓝·快速成长",
+            "蓝·专业打手",
+            "蓝·冒险",
+            "蓝·开攒",
+            "蓝·大亨",
+            "蓝·福袋",
+            "蓝·有钱同享",
+            "蓝·利己主义",
+            "蓝·最后的波纹",
         ],
-        "黄": ["黄·装备共鸣", "黄·大力巫术守护"],
-        "彩": ["彩·装备共鸣pro", "彩·法师战士射手礼包"],
+        "黄": [
+            "黄·装备共鸣法",
+            "黄·装备共鸣攻",
+            "黄·装备共鸣血",
+            "黄·大力",
+            "黄·巫术",
+            "黄·守护",
+        ],
+        "彩": [
+            "彩·装备共鸣法pro",
+            "彩·装备共鸣攻pro",
+            "彩·装备共鸣血pro",
+            "彩·法师礼包",
+            "彩·坦克礼包",
+            "彩·射手礼包",
+        ],
         "白": ["白·最后的波纹"],
     }
     single_by_prefix: dict[str, list[dict]] = {}
@@ -154,7 +177,7 @@ def _make_test_match_entry(
 ) -> dict[str, object]:
     return {
         "path": path,
-        "captured_at": "2026-07-01T12:00:00",
+        "captured_at": "2026-07-27T12:00:00",
         "pairs": pairs or [],
         "players": players,
     }
@@ -169,7 +192,7 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
             "match_a.png",
             _make_test_match_entry(
                 screenshot_name="match_a.png",
-                path="screenshots.0701/match_a.png",
+                path="screenshots.0727/match_a.png",
                 players=[
                     {
                         "rank": 1,
@@ -186,10 +209,10 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
                         ],
                         "cards": [
                             {"slot_index": 0, "card_name": "白·克隆技术"},
-                            {"slot_index": 1, "card_name": "蓝·福袋有钱"},
+                            {"slot_index": 1, "card_name": "蓝·福袋"},
                             {
                                 "slot_index": 2,
-                                "card_name": "蓝·一起刷刷刷+天降啾啾pro",
+                                "card_name": "蓝·天降揪揪pro",
                             },
                         ],
                     },
@@ -210,7 +233,7 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
                             {"slot_index": 0, "card_name": "蓝·克隆技术"},
                             {
                                 "slot_index": 1,
-                                "card_name": "蓝·一起刷刷刷+天降啾啾pro",
+                                "card_name": "蓝·一起刷刷刷",
                             },
                         ],
                     },
@@ -237,14 +260,14 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
             "match_b.png",
             _make_test_match_entry(
                 screenshot_name="match_b.png",
-                path="screenshots.0702/match_b.png",
+                path="screenshots.0728/match_b.png",
                 players=[
                     {
                         "rank": 1,
                         "row_index": 0,
                         "partner_player": 2,
                         "heroes": [],
-                        "cards": [{"slot_index": 0, "card_name": "蓝·福袋有钱"}],
+                        "cards": [{"slot_index": 0, "card_name": "蓝·福袋"}],
                     },
                     {
                         "rank": 2,
@@ -273,11 +296,15 @@ def _build_card_stats_db(tmp_path: Path) -> Path:
     return db_path
 
 
-MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
-    ("蓝", "最佳拍档", "蓝·拍档支援"),
-    ("蓝", "蓝·最佳拍档", "蓝·拍档支援"),
-    ("蓝", "最强支援", "蓝·拍档支援"),
-    ("蓝", "蓝·最强支援", "蓝·拍档支援"),
+CONCRETE_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
+    ("蓝", "半步满级", "蓝·半步满级"),
+    ("蓝", "蓝·半步满级", "蓝·半步满级"),
+    ("蓝", "满级玩家", "蓝·满级玩家"),
+    ("蓝", "蓝·满级玩家", "蓝·满级玩家"),
+    ("蓝", "最佳拍档", "蓝·最佳拍档"),
+    ("蓝", "蓝·最佳拍档", "蓝·最佳拍档"),
+    ("蓝", "最强支援", "蓝·最强支援"),
+    ("蓝", "蓝·最强支援", "蓝·最强支援"),
     ("蓝", "一起刷刷刷", "蓝·一起刷刷刷"),
     ("蓝", "蓝·一起刷刷刷", "蓝·一起刷刷刷"),
     ("蓝", "我们全都要", "蓝·我们全都要"),
@@ -286,45 +313,46 @@ MERGED_CARD_MATCH_CASES: list[tuple[str, str, str]] = [
     ("蓝", "快速成长", "蓝·快速成长"),
     ("蓝", "专业打手", "蓝·专业打手"),
     ("蓝", "冒险", "蓝·冒险"),
-    ("蓝", "天降啾啾pro", "蓝·天降啾啾pro"),
-    ("蓝", "蓝·天降啾啾pro", "蓝·天降啾啾pro"),
-    ("蓝", "天降啾啾", "蓝·天降啾啾pro"),
-    ("蓝", "开攒", "蓝·开攒大亨"),
-    ("蓝", "蓝·开攒", "蓝·开攒大亨"),
-    ("蓝", "开赞", "蓝·开攒大亨"),
-    ("蓝", "蓝·开赞", "蓝·开攒大亨"),
-    ("蓝", "大亨", "蓝·开攒大亨"),
-    ("蓝", "蓝·大亨", "蓝·开攒大亨"),
-    ("蓝", "福袋", "蓝·福袋有钱"),
-    ("蓝", "蓝·福袋", "蓝·福袋有钱"),
-    ("蓝", "福袋·蓝", "蓝·福袋有钱"),
-    ("蓝", "有钱同享", "蓝·福袋有钱"),
-    ("蓝", "蓝·有钱同享", "蓝·福袋有钱"),
-    ("蓝", "利己主义", "蓝·波纹利己"),
-    ("蓝", "蓝·利己主义", "蓝·波纹利己"),
-    ("蓝", "蓝·最后的波纹", "蓝·波纹利己"),
-    ("黄", "装备共鸣法", "黄·装备共鸣"),
-    ("黄", "黄·装备共鸣法", "黄·装备共鸣"),
-    ("黄", "装备共鸣攻", "黄·装备共鸣"),
-    ("黄", "装备共鸣血", "黄·装备共鸣"),
+    ("蓝", "天降揪揪pro", "蓝·天降揪揪pro"),
+    ("蓝", "蓝·天降揪揪pro", "蓝·天降揪揪pro"),
+    ("蓝", "天降啾啾pro", "蓝·天降揪揪pro"),
+    ("蓝", "蓝·天降啾啾pro", "蓝·天降揪揪pro"),
+    ("蓝", "天降啾啾", "蓝·天降揪揪pro"),
+    ("蓝", "开攒", "蓝·开攒"),
+    ("蓝", "蓝·开攒", "蓝·开攒"),
+    ("蓝", "开赞", "蓝·开攒"),
+    ("蓝", "蓝·开赞", "蓝·开攒"),
+    ("蓝", "大亨", "蓝·大亨"),
+    ("蓝", "蓝·大亨", "蓝·大亨"),
+    ("蓝", "福袋", "蓝·福袋"),
+    ("蓝", "蓝·福袋", "蓝·福袋"),
+    ("蓝", "有钱同享", "蓝·有钱同享"),
+    ("蓝", "蓝·有钱同享", "蓝·有钱同享"),
+    ("蓝", "利己主义", "蓝·利己主义"),
+    ("蓝", "蓝·利己主义", "蓝·利己主义"),
+    ("蓝", "蓝·最后的波纹", "蓝·最后的波纹"),
+    ("黄", "装备共鸣法", "黄·装备共鸣法"),
+    ("黄", "黄·装备共鸣法", "黄·装备共鸣法"),
+    ("黄", "装备共鸣攻", "黄·装备共鸣攻"),
+    ("黄", "装备共鸣血", "黄·装备共鸣血"),
     ("黄", "大力", "黄·大力"),
     ("黄", "巫术", "黄·巫术"),
     ("黄", "守护", "黄·守护"),
-    ("彩", "装备共鸣法pro", "彩·装备共鸣pro"),
-    ("彩", "彩·装备共鸣法pro", "彩·装备共鸣pro"),
-    ("彩", "装备共鸣攻pro", "彩·装备共鸣pro"),
-    ("彩", "装备共鸣血pro", "彩·装备共鸣pro"),
-    ("彩", "法师礼包", "彩·法师战士射手礼包"),
-    ("彩", "射手礼包", "彩·法师战士射手礼包"),
-    ("彩", "战士礼包", "彩·法师战士射手礼包"),
+    ("彩", "装备共鸣法pro", "彩·装备共鸣法pro"),
+    ("彩", "彩·装备共鸣法pro", "彩·装备共鸣法pro"),
+    ("彩", "装备共鸣攻pro", "彩·装备共鸣攻pro"),
+    ("彩", "装备共鸣血pro", "彩·装备共鸣血pro"),
+    ("彩", "法师礼包", "彩·法师礼包"),
+    ("彩", "射手礼包", "彩·射手礼包"),
+    ("彩", "坦克礼包", "彩·坦克礼包"),
 ]
 
 
-@pytest.mark.parametrize("prefix,ocr_text,expected_key", MERGED_CARD_MATCH_CASES)
-def test_fuzzy_match_merged_card_aliases(
+@pytest.mark.parametrize("prefix,ocr_text,expected_key", CONCRETE_CARD_MATCH_CASES)
+def test_fuzzy_match_concrete_card_names(
     prefix: str, ocr_text: str, expected_key: str
 ) -> None:
-    stats = _merged_card_stats()
+    stats = _concrete_card_stats()
     catalog = stats.prefix_catalog(prefix)
     matched_key, score, _ = fuzzy_match_card(ocr_text, prefix, catalog)
     assert matched_key == expected_key, f"OCR={ocr_text!r} prefix={prefix}"
@@ -332,7 +360,7 @@ def test_fuzzy_match_merged_card_aliases(
 
 
 def test_fuzzy_match_last_ripple_stays_white_when_prefix_white() -> None:
-    stats = _merged_card_stats()
+    stats = _concrete_card_stats()
     catalog = stats.prefix_catalog("白")
     matched_key, score, _ = fuzzy_match_card("最后的波纹", "白", catalog)
     assert matched_key == "白·最后的波纹"
@@ -342,10 +370,12 @@ def test_fuzzy_match_last_ripple_stays_white_when_prefix_white() -> None:
 @pytest.mark.parametrize(
     "prefix,logical_name",
     [
+        ("蓝", "蓝·半步满级"),
+        ("蓝", "蓝·满级玩家"),
         ("蓝", "蓝·一起刷刷刷"),
-        ("蓝", "蓝·天降啾啾pro"),
+        ("蓝", "蓝·天降揪揪pro"),
         ("蓝", "蓝·重质也重量pro"),
-        ("蓝", "蓝·拍档支援"),
+        ("蓝", "蓝·最佳拍档"),
         ("黄", "黄·快速成型"),
         ("黄", "黄·吸吸宝pro"),
         ("黄", "黄·巨神兵"),
@@ -388,14 +418,15 @@ def test_logical_catalog_matches_zero_sample_cards(prefix: str, logical_name: st
 
 
 @pytest.mark.parametrize("logical_name", ["黄·大力", "黄·巫术", "黄·守护"])
-def test_shared_template_keeps_display_name_and_uses_merged_stats(logical_name: str) -> None:
-    stats = _merged_card_stats()
+def test_shared_template_uses_concrete_stats(logical_name: str) -> None:
+    stats = _concrete_card_stats()
     matched_key, score, _ = fuzzy_match_card(logical_name, "黄", stats.prefix_catalog("黄"))
     assert matched_key == logical_name
     lookup_key = stats.metrics_lookup_key(matched_key)
-    assert lookup_key == "黄·大力巫术守护"
+    assert lookup_key == logical_name
     metrics = stats.get_metrics(matched_key, "黄")
-    assert metrics is stats.get_metrics(lookup_key, "黄")
+    assert metrics is not None
+    assert metrics.key == logical_name
 
     card = CardMatchResult(
         slot=0,
@@ -408,16 +439,15 @@ def test_shared_template_keeps_display_name_and_uses_merged_stats(logical_name: 
     )
     rendered = format_recommendation(build_recommendation("黄", [card], stats))
     assert logical_name in rendered
-    assert f"{logical_name}（共享统计）" in rendered
+    assert "共享统计" not in rendered
 
 
-def test_fuzzy_match_last_ripple_blue_fuzzy_to_boyl() -> None:
-    """Unprefixed 最后的波纹 under 蓝 may fuzzy-match 蓝·波纹利己 (no body alias)."""
-    stats = _merged_card_stats()
+def test_fuzzy_match_last_ripple_blue_uses_concrete_name() -> None:
+    stats = _concrete_card_stats()
     catalog = stats.prefix_catalog("蓝")
     matched_key, score, _ = fuzzy_match_card("最后的波纹", "蓝", catalog)
-    assert matched_key == "蓝·波纹利己"
-    assert score >= 0.55
+    assert matched_key == "蓝·最后的波纹"
+    assert score == 1.0
 
 
 def test_hand_card_roi_boxes() -> None:
@@ -507,11 +537,11 @@ def test_format_multi_sort_uses_card_names_not_slots() -> None:
     cards = [
         CardMatchResult(
             slot=0,
-            raw_text="福袋有钱",
-            cleaned_text="福袋有钱",
-            matched_key="蓝·福袋有钱",
+            raw_text="福袋",
+            cleaned_text="福袋",
+            matched_key="蓝·福袋",
             match_score=1.0,
-            metrics=stats.get_metrics("蓝·福袋有钱", "蓝"),
+            metrics=stats.get_metrics("蓝·福袋", "蓝"),
         ),
         CardMatchResult(
             slot=1,
@@ -538,7 +568,7 @@ def test_format_multi_sort_uses_card_names_not_slots() -> None:
     assert "卡1" not in sort_section
     assert "卡2" not in sort_section
     assert "卡3" not in sort_section
-    assert "福袋有钱" in sort_section
+    assert "福袋" in sort_section
     assert "克隆技术" in sort_section
     for dim in dims:
         for card in dim.cards:
@@ -554,7 +584,7 @@ def test_compact_line_marks_low_confidence() -> None:
             cleaned_text="一起刷刷刷",
             matched_key="蓝·一起刷刷刷",
             match_score=0.62,
-            metrics=stats.get_metrics("蓝·福袋有钱", "蓝"),
+            metrics=stats.get_metrics("蓝·福袋", "蓝"),
         ),
         CardMatchResult(
             slot=1,
@@ -568,9 +598,9 @@ def test_compact_line_marks_low_confidence() -> None:
             slot=2,
             raw_text="虾饺",
             cleaned_text="虾饺",
-            matched_key="蓝·福袋有钱",
+            matched_key="蓝·福袋",
             match_score=1.0,
-            metrics=stats.get_metrics("蓝·福袋有钱", "蓝"),
+            metrics=stats.get_metrics("蓝·福袋", "蓝"),
         ),
     ]
     text = format_recommendation(build_recommendation("蓝", cards, stats))
@@ -582,11 +612,11 @@ def test_recommendation_blue_uses_team_rank() -> None:
     cards = [
         CardMatchResult(
             slot=0,
-            raw_text="福袋有钱",
-            cleaned_text="福袋有钱",
-            matched_key="蓝·福袋有钱",
+            raw_text="福袋",
+            cleaned_text="福袋",
+            matched_key="蓝·福袋",
             match_score=1.0,
-            metrics=stats.get_metrics("蓝·福袋有钱", "蓝"),
+            metrics=stats.get_metrics("蓝·福袋", "蓝"),
         ),
         CardMatchResult(
             slot=1,
@@ -609,7 +639,7 @@ def test_recommendation_blue_uses_team_rank() -> None:
     assert result.recommended_slot == 0
     rendered = format_recommendation(result)
     assert "对比速览" in rendered
-    assert "福袋有钱" in rendered
+    assert "福袋" in rendered
     assert "队伍前二率" in rendered
     assert "队伍平均名次" in rendered
 
@@ -639,6 +669,7 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     assert stats.total_matches == 2
     assert stats.total_card_records > 0
 
+
     white_clone = stats.get_metrics("白·克隆技术", "白")
     white_shake = stats.get_metrics("白·摇盒", "白")
     assert white_clone is not None
@@ -650,40 +681,80 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     )
 
     blue_clone = stats.get_metrics("蓝·克隆技术", "蓝")
-    blue_bag = stats.get_metrics("蓝·福袋有钱", "蓝")
+    blue_bag = stats.get_metrics("蓝·福袋", "蓝")
     assert blue_clone is not None
     assert blue_bag is not None
     assert blue_clone.team_avg_rank is not None
     assert blue_clone.team_top2_rate is not None
 
-    normal_sss = stats.get_metrics("蓝·我们全都要+一起刷刷刷", "蓝")
-    pro_sss = stats.get_metrics("蓝·天降啾啾pro", "蓝")
+    normal_sss = stats.get_metrics("蓝·一起刷刷刷", "蓝")
+    pro_sss = stats.get_metrics("蓝·天降揪揪pro", "蓝")
     assert normal_sss is not None
     assert pro_sss is not None
     assert normal_sss.appearances == 1
     assert pro_sss.appearances == 1
-    assert stats.get_metrics("蓝·一起刷刷刷+天降啾啾pro", "蓝") is None
+    assert stats.get_metrics("蓝·一起刷刷刷+天降揪揪pro", "蓝") is None
+
+
+def test_detail_ocr_gt_survives_import_and_card_stats(tmp_path: Path) -> None:
+    db_path = tmp_path / "authoritative.db"
+    conn = init_match_db(db_path)
+    gt_data = {
+        "screenshots": {
+            "detail.png": _make_test_match_entry(
+                screenshot_name="detail.png",
+                path="screenshots.0727/detail.png",
+                players=[
+                    {
+                        "rank": 1,
+                        "row_index": 0,
+                        "heroes": [
+                            {"slot_index": 0, "hero_name": "测试英雄", "stars": 3}
+                            for _ in range(3)
+                        ],
+                        "cards": [
+                            {
+                                "slot_index": 0,
+                                "card_name": "蓝·最佳拍档",
+                                "source": "detail_ocr",
+                            },
+                            {
+                                "slot_index": 1,
+                                "card_name": "蓝·最强支援",
+                            },
+                        ],
+                    }
+                ],
+            )
+        }
+    }
+    import_ground_truth(conn, gt_data, dedupe_similar=False)
+    conn.close()
+
+    payload = build_card_stats_payload(db_path)
+    rows = payload["rankings"]["cards"]["single_cards_by_prefix"]["蓝"]
+    names = {row["key"] for row in rows}
+    assert "蓝·最佳拍档" in names
+    assert "蓝·最强支援" in names
+    assert "蓝·重质也重量pro" not in names
 
 
 @pytest.mark.parametrize(
-    ("actual_name", "merged_name"),
+    "actual_name",
     [
-        ("蓝·我们全都要", "蓝·我们全都要+一起刷刷刷"),
-        ("蓝·一起刷刷刷", "蓝·我们全都要+一起刷刷刷"),
-        ("蓝·我是老大", "蓝·我是老大+快速成长"),
-        ("蓝·快速成长", "蓝·我是老大+快速成长"),
-        ("蓝·专业打手", "蓝·专业打手+冒险"),
-        ("蓝·冒险", "蓝·专业打手+冒险"),
+        "蓝·我们全都要",
+        "蓝·一起刷刷刷",
+        "蓝·我是老大",
+        "蓝·快速成长",
+        "蓝·专业打手",
+        "蓝·冒险",
     ],
 )
-def test_exe_actual_blue_names_use_merged_statistics(
-    actual_name: str, merged_name: str
-) -> None:
-    stats = _merged_card_stats()
+def test_exe_actual_blue_names_use_concrete_statistics(actual_name: str) -> None:
+    stats = _concrete_card_stats()
     actual = stats.get_metrics(actual_name, "蓝")
-    merged = stats.get_metrics(merged_name, "蓝")
-    assert actual is merged
     assert actual is not None
+    assert actual.key == actual_name
     assert actual.appearances == 50
 
 
@@ -696,7 +767,7 @@ def _build_jsb_xj_stats_db(tmp_path: Path) -> Path:
             "jsb_match.png",
             _make_test_match_entry(
                 screenshot_name="jsb_match.png",
-                path="screenshots.0701/jsb_match.png",
+                path="screenshots.0727/jsb_match.png",
                 players=[
                     {
                         "rank": 1,
@@ -763,7 +834,7 @@ def _build_jsb_xj_stats_db(tmp_path: Path) -> Path:
     return db_path
 
 
-def test_card_stats_jsb_xj_equipment_ratio_disambiguation(tmp_path: Path) -> None:
+def test_card_stats_jsb_xj_preserves_concrete_labels(tmp_path: Path) -> None:
     db_path = _build_jsb_xj_stats_db(tmp_path)
     first = CardStatsIndex.from_db_path(db_path)
     second = CardStatsIndex.from_db_path(db_path)
@@ -772,10 +843,9 @@ def test_card_stats_jsb_xj_equipment_ratio_disambiguation(tmp_path: Path) -> Non
     xj = first.get_metrics("黄·迅迅迅捷双剑", "黄")
     assert jsb is not None
     assert xj is not None
-    # Clear samples: 2 axe + 1 sword; one tie uses the 2:1 ratio with fixed seed.
     assert jsb.appearances + xj.appearances == 4
-    assert jsb.appearances >= 2
-    assert xj.appearances >= 1
+    assert jsb.appearances == 2
+    assert xj.appearances == 2
     assert first.get_metrics("黄·巨神兵+迅迅迅捷双剑", "黄") is None
 
     jsb2 = second.get_metrics("黄·巨神兵", "黄")
@@ -919,11 +989,13 @@ def test_build_release_validation_rejects_stale_or_merged_data(tmp_path: Path) -
     source_dir.mkdir()
     (output_dir / "data").mkdir(parents=True)
     (output_dir / "_internal" / "data").mkdir(parents=True)
-    source_db = source_dir / "match_latest.db"
+    source_db = _build_card_stats_db(source_dir)
     source_json = source_dir / "latest_meta_analysis.json"
-    source_db.write_bytes(b"fresh-db")
 
-    rows = [{"key": key, "appearances": 0} for key in build_script.REQUIRED_SPLIT_CARD_KEYS]
+    rows = [
+        {"key": key, "appearances": 0}
+        for key in build_script.REQUIRED_CONCRETE_CARD_KEYS
+    ]
     payload = {
         "rankings": {
             "cards": {
@@ -955,7 +1027,7 @@ def test_build_release_validation_rejects_stale_or_merged_data(tmp_path: Path) -
             source_json.read_bytes()
         )
         payload["rankings"]["cards"]["single_cards_by_prefix"]["蓝"].append(
-            {"key": "蓝·一起刷刷刷+天降啾啾pro", "appearances": 1}
+            {"key": "蓝·一起刷刷刷+天降揪揪pro", "appearances": 1}
         )
         source_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         (output_dir / "data" / source_json.name).write_bytes(source_json.read_bytes())

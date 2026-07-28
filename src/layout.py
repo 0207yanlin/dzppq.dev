@@ -32,6 +32,11 @@ CARD_Y_BASE = 305
 CARD_W = 45
 CARD_H = 45
 
+# Card-detail hover panel (landscape 2160x1600).  Card names are rendered
+# without their color prefix in this panel.
+CARD_DETAIL_NAME_ROI = (1650, 650, 2130, 780)
+CARD_DETAIL_TEXT_ROI = (1650, 780, 2130, 1120)
+
 # Hand-pick UI (three large card choices, landscape 2160x1600)
 HAND_CARD_BOXES: tuple[tuple[int, int, int, int], ...] = (
     (510, 490, 1050, 650),
@@ -75,6 +80,12 @@ def card_roi(player: int, slot: int) -> tuple[int, int, int, int]:
     x1 = CARD_X_BASE + CARD_X_OFFSET[slot]
     y1 = CARD_Y_BASE + CARD_Y_OFFSET[player]
     return x1, y1, x1 + CARD_W, y1 + CARD_H
+
+
+def card_tap_point(player: int, slot: int) -> tuple[int, int]:
+    """Return the center point used to open a summary card's detail panel."""
+    x1, y1, x2, y2 = card_roi(player, slot)
+    return (x1 + x2) // 2, (y1 + y2) // 2
 
 
 def hand_card_roi(slot: int) -> tuple[int, int, int, int]:
