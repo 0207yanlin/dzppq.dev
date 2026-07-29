@@ -214,10 +214,13 @@ assets/templates/cards/{stem}.jpg
 5. 若 JPG stem 是复合名称，或报告在工作簿缺失时仍需展开候选，同步
    `.cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py` 的
    `MERGED_TEMPLATE_EXPANSIONS`。
-6. 将新增的具体卡名加入 `src/card_pick_recommend.py` 的 `LOGICAL_CARD_KEYS`，使推荐器在零样本阶段也能 OCR 匹配并显示“暂无统计”。
-7. 发布推荐 EXE 时，把具体卡名加入
-   `scripts/build_card_pick_recommender_exe.py` 的 `REQUIRED_CONCRETE_CARD_KEYS`。
-   若本次拆除了旧合并统计键，再把旧键加入 `STALE_MERGED_RANKING_KEYS`。
+6. 推荐器会从最新 DB（不可用时回退 JSON）自动加载已入库的具体卡名，无需为常规新增卡牌修改
+   `src/card_pick_recommend.py` 或 EXE。只有希望尚无任何样本的新卡也能被 OCR 匹配并显示“暂无统计”时，
+   才将其预注册到 `LOGICAL_CARD_KEYS`。
+7. 不要因为新增卡牌修改
+   `scripts/build_card_pick_recommender_exe.py` 的 `REQUIRED_CONCRETE_CARD_KEYS`；
+   该集合只是既有发布数据的完整性断言，不是推荐器卡牌目录。只有拆除旧合并统计键时，才按需更新
+   `STALE_MERGED_RANKING_KEYS`。
 8. 小范围采集并检查 sidecar：共享模板必须输出某个具体卡名和 `source=detail_ocr`；
    无法唯一确认时必须为 `unknown`，不得回退为组合 stem。
 9. 运行 `python scripts/process_match_batch.py --batch MMDD`，刷新 GT、数据库和分析产物；
@@ -232,8 +235,8 @@ assets/templates/cards/{stem}.jpg
 | `MERGED_TEMPLATE_EXPANSIONS` | 复合 stem、无工作簿报告回退或历史拆分时修改 |
 | `CARD_LABEL_ALIASES` | 只用于稳定别名、OCR 变体或历史归一；0727+ 具体卡不应互相合并 |
 | `OCR_EXACT_QUERY_ALIASES` | 三选一卡名 OCR 有稳定错字时修改 |
-| `LOGICAL_CARD_KEYS` | 新增具体卡名时修改，保证零样本可识别 |
-| `REQUIRED_CONCRETE_CARD_KEYS` | 发布推荐 EXE 时修改 |
+| `LOGICAL_CARD_KEYS` | 仅需让尚未入库的零样本卡也可识别时预注册；已入库新卡无需修改 |
+| `REQUIRED_CONCRETE_CARD_KEYS` | 既有发布数据完整性断言；不要随常规新增卡牌修改 |
 | `STALE_MERGED_RANKING_KEYS` | 退役旧合并排行键时修改 |
 | 0727 backfill / GT normalize 脚本 | 仅清理已入库历史数据时修改 |
 
@@ -501,6 +504,8 @@ python .cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py
 JSON）读取该卡自己的指标。所有共用图标卡牌均直接比较具体统计，不再显示或读取“共享统计”。
 catalog 中已有但暂时为零样本的具体卡显示“暂无统计”。查询层只保留 OCR 拼写纠正，例如
 `开赞` / `开揽` → `蓝·开攒`、`天降啾啾pro` → `蓝·天降揪揪pro`。
+新卡一旦进入 DB/JSON 就会自动进入推荐器 catalog，新增卡牌本身不需要修改或重编译 EXE；
+`LOGICAL_CARD_KEYS` 只用于零样本预注册。
 
 发布 EXE 必须 clean rebuild，禁止复用旧 `dist` 数据。先刷新 `data/match_latest.db` 与
 `data/latest_meta_analysis.json`，再执行：

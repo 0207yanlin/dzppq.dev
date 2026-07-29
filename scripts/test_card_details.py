@@ -35,6 +35,7 @@ ASSETS = (
     "黄·巨神兵",
     "黄·迅迅迅捷双剑",
     "黄·摇盒高手",
+    "黄·终极反击",
     "彩·普通卡",
 )
 
@@ -65,7 +66,7 @@ class CardDetailsWorkbookTests(unittest.TestCase):
             self.workbook_path,
             template_dir=self.template_dir,
         )
-        self.assertEqual(counts, {"白": 1, "蓝": 9, "黄": 6, "彩": 1, "同模板组合": 7})
+        self.assertEqual(counts, {"白": 1, "蓝": 9, "黄": 8, "彩": 1, "同模板组合": 8})
         self.assertEqual(
             loaded.same_template_candidates["蓝·半步满级+满级玩家"],
             ("蓝·半步满级", "蓝·满级玩家"),
@@ -81,6 +82,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             loaded.same_template_candidates["黄·巨神兵"],
             loaded.same_template_candidates["黄·迅迅迅捷双剑"],
+        )
+        self.assertEqual(
+            loaded.same_template_candidates["黄·终极反击"],
+            ("黄·终极反击", "黄·学术反击"),
         )
         # Candidate names remain real names; CARD_LABEL_ALIASES is not applied.
         self.assertIn("蓝·最佳拍档", loaded.by_color["蓝"])

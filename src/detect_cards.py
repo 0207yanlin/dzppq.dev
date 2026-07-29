@@ -545,6 +545,12 @@ def _try_shape_family_color_rescue(
         return None
     if winner["combined"] < combined_floor:
         return None
+    global_best = max(details, key=lambda item: item["combined"])
+    if (
+        _detail_label(global_best) not in group["labels"]
+        and global_best["combined"] - winner["combined"] > 0.10
+    ):
+        return None
     if best_combined - winner["combined"] > 0.10:
         return None
 

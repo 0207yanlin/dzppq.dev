@@ -142,6 +142,16 @@ class SelectCardMatchTests(unittest.TestCase):
             {"shape_family_color_rescue", "shape_cluster_color"},
         )
 
+    def test_full_level_rescue_does_not_override_timed_gift(self) -> None:
+        details = [
+            _detail("蓝·定时礼物.jpg", combined=0.98, shape=0.98, color=0.96),
+            _detail("蓝·半步满级+满级玩家.jpg", combined=0.78, shape=0.75, color=0.957),
+            _detail("白·满级玩家.jpg", combined=0.61, shape=0.58, color=0.91),
+        ]
+        decision = self._select(details)
+        self.assertEqual(decision.label, "蓝·定时礼物")
+        self.assertEqual(decision.debug["match_path"], "combined")
+
     def test_matthew_max_color_rescue(self) -> None:
         details = [
             _detail("白·马太效应.jpg", combined=0.84, shape=0.90, color=0.962),

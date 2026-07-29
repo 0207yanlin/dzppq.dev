@@ -509,6 +509,8 @@ def test_name_repairs_are_not_global_aliases() -> None:
         ("黄·吸吸宝pro快速成型", "吸吸宝pro", "黄·吸吸宝pro"),
         ("蓝·一起刷刷刷+天降揪揪pro", "天降揪揪pro", "蓝·天降揪揪pro"),
         ("黄·巨神兵", "迅迅迅捷双剑", "黄·迅迅迅捷双剑"),
+        ("黄·终极反击", "终极反击", "黄·终极反击"),
+        ("黄·终极反击", "学术反击", "黄·学术反击"),
     ],
 )
 def test_rank6_0727_detail_observations_resolve(
