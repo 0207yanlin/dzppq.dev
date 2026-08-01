@@ -1639,6 +1639,55 @@ class MetaReportContractTests(unittest.TestCase):
             self.assertTrue(data["outputs"]["hero_equipment_pages"])
 
 
+    def test_write_outputs_emits_composition_screenshot_pages(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        data = sample_data()
+        comp = data["rankings"]["composition_recommendations"]["赌狗"][0]
+        comp["raw_screenshot_samples"] = {
+            "mature": [
+                {
+                    "stage": "mature",
+                    "player_id": 11,
+                    "match_id": 21,
+                    "rank": 2,
+                    "level": 8,
+                    "match_batch": "0731",
+                    "screenshot_name": "missing.png",
+                    "screenshot_path": "screenshots.0731/missing.png",
+                    "image_exists": False,
+                    "heroes": ["厨师长", "蛋小厨"],
+                }
+            ],
+            "transition": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            json_path = root / "out.json"
+            md_path = root / "out.md"
+            html_path = root / "环境分析详情.html"
+            xlsx_path = root / "out.xlsx"
+            hero_dir = root / "hero-equipment"
+            original_xlsx = MODULE.render_xlsx
+            MODULE.render_xlsx = lambda *_args, **_kwargs: None
+            try:
+                MODULE.write_outputs(data, json_path, md_path, html_path, xlsx_path, hero_dir)
+            finally:
+                MODULE.render_xlsx = original_xlsx
+            page_paths = data["outputs"]["composition_screenshot_pages"]
+            self.assertTrue(page_paths)
+            page = root / Path(page_paths[0]).relative_to(root)
+            self.assertTrue(page.exists())
+            page_html = page.read_text(encoding="utf-8")
+            self.assertIn("成熟样本", page_html)
+            self.assertIn("原始截图文件不可用", page_html)
+            dashboard_html = html_path.read_text(encoding="utf-8")
+            self.assertIn("查看成熟/过渡原始对局截图", dashboard_html)
+            self.assertIn('target="_blank" rel="noopener noreferrer"', dashboard_html)
+            self.assertIn("raw_screenshot_page", json_path.read_text(encoding="utf-8"))
+
+
 
 
 if __name__ == "__main__":

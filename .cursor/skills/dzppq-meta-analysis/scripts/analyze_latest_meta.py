@@ -7,6 +7,7 @@ import argparse
 import html
 import itertools
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -36,6 +37,8 @@ DEFAULT_MD = ROOT / "data" / "latest_meta_analysis_report.md"
 DEFAULT_INTERACTIVE_HTML = ROOT / "data" / "环境分析详情.html"
 DEFAULT_XLSX = ROOT / "data" / "latest_meta_analysis_equipment.xlsx"
 DEFAULT_HERO_EQUIPMENT_DIR = ROOT / "data" / "hero-equipment"
+DEFAULT_COMPOSITION_SCREENSHOT_DIR = ROOT / "data" / "composition-screenshots"
+COMPOSITION_SCREENSHOT_SAMPLE_LIMIT = 3
 CARD_HTML_SUFFIXES = {
     "彩": "cai",
     "黄": "yellow",
@@ -239,6 +242,8 @@ class PlayerFeature:
     team_rank: int | None = None
     team_best_rank: int | None = None
     match_batch: str | None = None
+    screenshot_name: str | None = None
+    screenshot_path: str | None = None
     sample_weight: float = 1.0
     # Identity is intentionally separate from active_traits/main_bond.  The
     # latter are factual board state; identity describes how the board is
@@ -1352,10 +1357,13 @@ def load_player_features(
     conn.row_factory = sqlite3.Row
     match_meta = {
         int(row["id"]): {
+            "screenshot_name": row["screenshot_name"],
             "path": row["path"],
             "match_date": row["match_date"],
         }
-        for row in conn.execute("SELECT id, path, match_date FROM matches").fetchall()
+        for row in conn.execute(
+            "SELECT id, screenshot_name, path, match_date FROM matches"
+        ).fetchall()
     }
     player_rows = conn.execute("SELECT * FROM players ORDER BY match_id, rank").fetchall()
     kept_player_ids = {int(row["id"]) for row in player_rows if int(row["id"]) not in bot_ids}
@@ -1523,6 +1531,8 @@ def load_player_features(
                 hero_set={hero.name for hero in heroes if is_lineup_hero(hero.name)},
                 level=level_label(sum(1 for hero in heroes if is_lineup_hero(hero.name))),
                 match_batch=match_batch,
+                screenshot_name=meta.get("screenshot_name"),
+                screenshot_path=meta.get("path"),
             )
         food_evidence = food_harvest_evidence(heroes)
         trait_investment = analyze_trait_investment(
@@ -3284,6 +3294,86 @@ def build_composition_recommendations(
     }
 
 
+def _screenshot_file_path(path_value: str | None) -> Path | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _composition_screenshot_sample(
+    feature: PlayerFeature,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    screenshot_path = (feature.screenshot_path or "").replace("\\", "/")
+    image_path = _screenshot_file_path(screenshot_path)
+    return {
+        "stage": stage,
+        "player_id": feature.player_id,
+        "match_id": feature.match_id,
+        "rank": feature.rank,
+        "level": feature.level,
+        "match_batch": feature.match_batch,
+        "screenshot_name": feature.screenshot_name,
+        "screenshot_path": screenshot_path or None,
+        "image_exists": bool(image_path and image_path.is_file()),
+        "heroes": [hero.name for hero in feature.heroes if is_lineup_hero(hero.name)],
+    }
+
+
+def attach_composition_screenshot_samples(
+    comp_rows: list[dict[str, Any]],
+    features: list[PlayerFeature],
+) -> None:
+    """Attach a small, auditable set of raw-board screenshots to each strategy."""
+    feature_by_id = {feature.player_id: feature for feature in features}
+    for comp in comp_rows:
+        mature_ids = set(comp.get("mature_member_player_ids", []))
+        if not mature_ids:
+            mature_ids = set(comp.get("member_player_ids", []))
+        transition_ids = {
+            player_id
+            for stage in comp.get("transition_stages", [])
+            for player_id in stage.get("member_player_ids", [])
+        }
+        stage_samples: dict[str, list[dict[str, Any]]] = {}
+        for stage, player_ids in (
+            ("mature", mature_ids),
+            ("transition", transition_ids),
+        ):
+            candidates = [
+                feature_by_id[player_id]
+                for player_id in player_ids
+                if player_id in feature_by_id
+            ]
+            candidates.sort(
+                key=lambda feature: (
+                    not bool(
+                        _screenshot_file_path(feature.screenshot_path)
+                        and _screenshot_file_path(feature.screenshot_path).is_file()
+                    ),
+                    feature.rank,
+                    -feature.level,
+                    feature.match_batch or "",
+                    feature.player_id,
+                )
+            )
+            selected: list[dict[str, Any]] = []
+            seen_paths: set[str] = set()
+            for feature in candidates:
+                path_key = (feature.screenshot_path or "").replace("\\", "/")
+                if path_key and path_key in seen_paths:
+                    continue
+                if path_key:
+                    seen_paths.add(path_key)
+                selected.append(_composition_screenshot_sample(feature, stage=stage))
+                if len(selected) >= COMPOSITION_SCREENSHOT_SAMPLE_LIMIT:
+                    break
+            stage_samples[stage] = selected
+        comp["raw_screenshot_samples"] = stage_samples
+
+
 def avg_number(values: list[int | float]) -> float | None:
     if not values:
         return None
@@ -4745,6 +4835,7 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
             balance_boundary=balance_boundary,
         )
         comp_rows = merge_comp_strategies(stage_rows, features)
+        attach_composition_screenshot_samples(comp_rows, features)
         calibrate_composition_confidence(comp_rows, features)
         trend_methodology = attach_composition_trends(
             comp_rows,
@@ -6520,6 +6611,122 @@ def html_variant_board_cards(comp: dict[str, Any]) -> str:
     return f'<div class="board-grid">{"".join(cards)}</div>'
 
 
+def composition_screenshot_page_filename(comp: dict[str, Any]) -> str:
+    family_id = int(comp.get("family_id", 0) or 0)
+    strategy_id = str(comp.get("strategy_id") or comp.get("label") or "composition")
+    slug = re.sub(r"[^\w.-]+", "-", strategy_id, flags=re.UNICODE).strip("-")[:80]
+    return f"composition-{family_id}-{slug or 'detail'}.html"
+
+
+def _screenshot_href(
+    screenshot_path: str | None,
+    *,
+    page_dir: Path,
+) -> str | None:
+    image_path = _screenshot_file_path(screenshot_path)
+    if not image_path or not image_path.is_file():
+        return None
+    relative = os.path.relpath(image_path, page_dir).replace(os.sep, "/")
+    return quote(relative, safe="/:@-._~")
+
+
+def render_composition_screenshot_page(
+    comp: dict[str, Any],
+    *,
+    page_dir: Path,
+) -> str:
+    stage_labels = (("mature", "成熟样本"), ("transition", "过渡样本"))
+    sections: list[str] = []
+    for stage, stage_label in stage_labels:
+        samples = (comp.get("raw_screenshot_samples") or {}).get(stage, [])
+        cards: list[str] = []
+        for sample in samples:
+            href = _screenshot_href(sample.get("screenshot_path"), page_dir=page_dir)
+            if href and sample.get("image_exists"):
+                image = (
+                    f'<a href="{esc(href)}" target="_blank" rel="noopener noreferrer">'
+                    f'<img src="{esc(href)}" loading="lazy" alt="{esc(stage_label)}原始对局截图">'
+                    "</a>"
+                )
+            else:
+                image = (
+                    '<div class="missing">原始截图文件不可用'
+                    f'<br><code>{esc(sample.get("screenshot_path") or "未记录路径")}</code></div>'
+                )
+            heroes = "、".join(sample.get("heroes") or []) or "阵容信息不可用"
+            cards.append(
+                f"""
+                <article class="sample-card">
+                  {image}
+                  <div class="sample-meta">
+                    <strong>第 {esc(str(sample.get("rank", "—")))} 名 · Lv{esc(str(sample.get("level", "—")))}</strong>
+                    <span>批次 {esc(str(sample.get("match_batch") or "—"))} · 玩家 {esc(str(sample.get("player_id", "—")))}</span>
+                    <span>棋子：{esc(heroes)}</span>
+                    <span class="muted">{esc(str(sample.get("screenshot_name") or sample.get("screenshot_path") or "—"))}</span>
+                  </div>
+                </article>
+                """
+            )
+        if not cards:
+            cards.append('<p class="empty">当前阶段没有可关联的原始对局截图样本。</p>')
+        sections.append(
+            f'<section><h2>{esc(stage_label)}</h2><div class="samples">{"".join(cards)}</div></section>'
+        )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{esc(comp.get("label", "阵容"))} · 原始对局截图</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    body {{ margin: 0; background: #101217; color: #e9edf5; font: 15px/1.6 system-ui, sans-serif; }}
+    main {{ max-width: 1500px; margin: 0 auto; padding: 28px; }}
+    h1 {{ margin: 0 0 8px; font-size: 26px; }}
+    h2 {{ margin: 28px 0 12px; color: #f0c674; }}
+    .sub {{ color: #aab3c2; margin-bottom: 20px; }}
+    .samples {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }}
+    .sample-card {{ overflow: hidden; border: 1px solid #303643; border-radius: 10px; background: #181c25; }}
+    img {{ display: block; width: 100%; height: auto; background: #0b0d11; }}
+    .sample-meta {{ display: grid; gap: 3px; padding: 12px 14px; }}
+    .sample-meta span {{ color: #b8c0ce; }}
+    .sample-meta .muted, code {{ color: #7f8999; font-size: 12px; overflow-wrap: anywhere; }}
+    .missing, .empty {{ padding: 28px 16px; color: #d59a9a; text-align: center; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{esc(comp.get("label", "阵容"))}</h1>
+    <div class="sub">原始对局截图 · 阵容类型：{esc(comp.get("play_style", "—"))} · 代表样本最多展示 {COMPOSITION_SCREENSHOT_SAMPLE_LIMIT} 张</div>
+    {"".join(sections)}
+  </main>
+</body>
+</html>
+"""
+
+
+def write_composition_screenshot_pages(
+    data: dict[str, Any],
+    output_dir: Path,
+) -> list[str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_page in output_dir.glob("composition-*.html"):
+        stale_page.unlink()
+    pages: list[str] = []
+    recommendations = data.get("rankings", {}).get("composition_recommendations", {})
+    for style in PLAY_STYLES:
+        for comp in recommendations.get(style, []):
+            filename = composition_screenshot_page_filename(comp)
+            page_path = output_dir / filename
+            comp["raw_screenshot_page"] = rel(page_path)
+            page_path.write_text(
+                render_composition_screenshot_page(comp, page_dir=output_dir),
+                encoding="utf-8",
+            )
+            pages.append(rel(page_path))
+    return pages
+
+
 def html_comp_detail_page(
     comp: dict[str, Any],
     *,
@@ -6598,6 +6805,13 @@ def html_comp_detail_page(
         if transition_stats and transition_stats.get("appearances")
         else ("存在过渡样本" if comp.get("transition_stages") else "—")
     )
+    screenshot_link = comp.get("raw_screenshot_page")
+    screenshot_html = (
+        f'<a class="screenshot-link" href="{esc(quote(screenshot_link.removeprefix("data/"), safe="/:@-._~"))}" '
+        'target="_blank" rel="noopener noreferrer">查看成熟/过渡原始对局截图</a>'
+        if screenshot_link
+        else '<span class="muted">暂无原始对局截图页面</span>'
+    )
     cluster_lines = format_cluster_merge_reason_lines(comp)
     cluster_html = "".join(f"<p>{esc(line.lstrip('- '))}</p>" for line in cluster_lines)
     failure_text = format_recommendation_failure_reasons_text(evidence)
@@ -6634,6 +6848,7 @@ def html_comp_detail_page(
         <div class="detail-grid">
           <div class="detail-panel">
             <h3>阵容概览</h3>
+            <p>{screenshot_html}</p>
             <p><strong>玩法原型：</strong>{esc(archetype)}</p>
             <p><strong>归类证据：</strong>{esc(format_archetype_signals_text(comp))}</p>
             {cluster_html}
@@ -7905,6 +8120,16 @@ def interactive_dashboard_css() -> str:
       border-bottom: 1px dashed rgba(253,230,138,.45);
     }
     .hero-equipment-link:hover { color: #fff7c2; }
+    .screenshot-link {
+      display: inline-block;
+      color: #fde68a;
+      font-weight: 700;
+      text-decoration: none;
+      border: 1px solid rgba(253,230,138,.45);
+      border-radius: 999px;
+      padding: 5px 10px;
+    }
+    .screenshot-link:hover { color: #fff7c2; border-color: #fde68a; }
     footer { margin-top: 22px; color: #94a3b8; font-size: 14px; text-align: center; }
     @media (max-width: 900px) {
       .detail-grid, .board-grid { grid-template-columns: 1fr; }
@@ -8341,8 +8566,10 @@ def write_outputs(
     md_path.parent.mkdir(parents=True, exist_ok=True)
     interactive_html_path.parent.mkdir(parents=True, exist_ok=True)
     hero_dir = hero_equipment_dir or DEFAULT_HERO_EQUIPMENT_DIR
+    screenshot_dir = interactive_html_path.parent / "composition-screenshots"
 
     hero_pages = write_hero_equipment_pages(data, hero_dir)
+    screenshot_pages = write_composition_screenshot_pages(data, screenshot_dir)
     data["outputs"] = {
         "equipment_xlsx": rel(xlsx_path),
         "json": rel(json_path),
@@ -8350,6 +8577,8 @@ def write_outputs(
         "interactive_html": rel(interactive_html_path),
         "hero_equipment_dir": rel(hero_dir),
         "hero_equipment_pages": hero_pages,
+        "composition_screenshot_dir": rel(screenshot_dir),
+        "composition_screenshot_pages": screenshot_pages,
     }
     md_path.write_text(render_md(data), encoding="utf-8")
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
