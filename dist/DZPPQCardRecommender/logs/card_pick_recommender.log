@@ -626,3 +626,114 @@ RuntimeError: No adb device detected.
 2026-08-04 00:15:46,144 INFO adb session ready: 127.0.0.1:16384
 2026-08-04 00:15:47,311 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
 2026-08-04 00:15:49,514 INFO Timing ms: connect=1163 capture=1168 ocr=2202 match=0 total=4533
+2026-08-04 18:03:37,998 INFO Loading card stats from DB: D:\dzppq.dev\dist\DZPPQCardRecommender\data\match_latest.db
+2026-08-04 18:03:38,594 INFO Card stats loaded from D:\dzppq.dev\dist\DZPPQCardRecommender\data\match_latest.db (db, matches=965, cards=23124)
+2026-08-04 18:03:38,594 INFO Started from D:\dzppq.dev\dist\DZPPQCardRecommender (frozen=True)
+2026-08-04 18:03:38,594 INFO 运行: exe | 构建: 2026-07-28 19:54
+2026-08-04 18:03:39,439 INFO OCR backend: rapidocr (use_cls=False)
+2026-08-04 18:03:40,926 INFO OCR warmup completed (backend=rapidocr, 2438 ms)
+2026-08-04 18:44:33,279 INFO adb connect: connected to 127.0.0.1:16384
+2026-08-04 18:44:33,281 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 18:44:34,019 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 18:44:35,298 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 18:44:38,083 INFO Timing ms: connect=1247 capture=1277 ocr=2783 match=1 total=5309
+2026-08-04 18:58:45,715 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 18:58:45,715 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 18:58:46,445 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 18:58:47,647 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 18:58:49,836 INFO Timing ms: connect=1153 capture=1202 ocr=2189 match=0 total=4544
+2026-08-04 21:46:40,433 INFO adb connect: connected to 127.0.0.1:16384
+2026-08-04 21:46:40,433 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 21:46:41,171 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 21:46:42,786 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 21:46:44,636 INFO Timing ms: connect=1178 capture=1615 ocr=1850 match=0 total=4643
+2026-08-04 21:52:19,012 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 21:52:19,012 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 21:52:19,747 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 21:52:20,968 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 21:52:22,907 INFO Timing ms: connect=1147 capture=1221 ocr=1939 match=0 total=4307
+2026-08-04 21:52:35,194 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 21:52:35,194 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 21:52:35,905 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 21:52:37,055 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 21:52:39,163 INFO Timing ms: connect=1127 capture=1150 ocr=2108 match=0 total=4385
+2026-08-04 21:58:49,431 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 21:58:49,431 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 21:58:50,159 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 21:58:51,333 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 21:58:53,373 INFO Timing ms: connect=1123 capture=1174 ocr=2040 match=0 total=4337
+2026-08-04 22:32:57,648 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 22:32:57,648 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 22:32:58,376 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 22:32:59,579 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 22:33:01,611 INFO Timing ms: connect=1159 capture=1203 ocr=2033 match=0 total=4395
+2026-08-04 22:38:38,676 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 22:38:38,677 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 22:38:39,418 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 22:38:40,590 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 22:38:42,617 INFO Timing ms: connect=1144 capture=1172 ocr=2027 match=0 total=4343
+2026-08-04 22:38:50,182 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 22:38:50,182 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 22:38:50,913 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 22:38:52,065 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 22:38:54,125 INFO Timing ms: connect=1135 capture=1152 ocr=2061 match=0 total=4348
+2026-08-04 22:44:17,912 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 22:44:17,912 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 22:44:18,631 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 22:44:19,796 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 22:44:21,790 INFO Timing ms: connect=1115 capture=1165 ocr=1994 match=0 total=4274
+2026-08-04 23:01:53,787 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 23:01:53,788 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 23:01:54,521 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 23:01:55,757 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 23:01:57,853 INFO Timing ms: connect=1131 capture=1236 ocr=2096 match=0 total=4462
+2026-08-04 23:39:01,255 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 23:39:01,256 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 23:39:01,997 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 23:39:03,157 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 23:39:05,353 INFO Timing ms: connect=1166 capture=1160 ocr=2195 match=1 total=4522
+2026-08-04 23:45:12,027 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 23:45:12,027 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 23:45:12,751 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 23:45:13,976 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 23:45:16,203 INFO Timing ms: connect=1156 capture=1226 ocr=2227 match=0 total=4609
+2026-08-04 23:51:23,700 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-04 23:51:23,700 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-04 23:51:24,416 INFO adb session ready: 127.0.0.1:16384
+2026-08-04 23:51:25,647 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-04 23:51:27,576 INFO Timing ms: connect=1121 capture=1231 ocr=1928 match=0 total=4280
+2026-08-05 00:09:13,766 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:09:13,766 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:09:14,500 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:09:15,704 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:09:17,789 INFO Timing ms: connect=1149 capture=1204 ocr=2085 match=0 total=4438
+2026-08-05 00:16:05,508 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:16:05,508 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:16:06,240 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:16:07,387 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:16:09,324 INFO Timing ms: connect=1140 capture=1146 ocr=1938 match=0 total=4225
+2026-08-05 00:22:01,432 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:22:01,432 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:22:02,155 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:22:03,312 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:22:05,375 INFO Timing ms: connect=1145 capture=1157 ocr=2062 match=1 total=4365
+2026-08-05 00:48:06,583 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:48:06,584 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:48:07,326 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:48:08,534 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:48:10,876 INFO Timing ms: connect=1189 capture=1209 ocr=2341 match=0 total=4739
+2026-08-05 00:48:17,835 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:48:17,836 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:48:18,563 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:48:19,765 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:48:21,875 INFO Timing ms: connect=1117 capture=1202 ocr=2110 match=0 total=4429
+2026-08-05 00:54:23,525 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 00:54:23,525 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 00:54:24,264 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 00:54:25,449 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 00:54:27,565 INFO Timing ms: connect=1125 capture=1185 ocr=2116 match=0 total=4427
+2026-08-05 01:00:26,502 INFO adb connect: already connected to 127.0.0.1:16384
+2026-08-05 01:00:26,502 INFO adb auto-connect: 127.0.0.1:16384
+2026-08-05 01:00:27,205 INFO adb session ready: 127.0.0.1:16384
+2026-08-05 01:00:28,343 INFO Resolution OK: device=127.0.0.1:16384 wm=1600x2160 screenshot=2160x1600
+2026-08-05 01:00:30,165 INFO Timing ms: connect=1119 capture=1138 ocr=1821 match=0 total=4078
