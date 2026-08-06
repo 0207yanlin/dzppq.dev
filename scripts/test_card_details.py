@@ -36,6 +36,7 @@ ASSETS = (
     "黄·迅迅迅捷双剑",
     "黄·摇盒高手",
     "黄·终极反击",
+    "黄·蛋商银行",
     "彩·普通卡",
 )
 
@@ -66,7 +67,7 @@ class CardDetailsWorkbookTests(unittest.TestCase):
             self.workbook_path,
             template_dir=self.template_dir,
         )
-        self.assertEqual(counts, {"白": 1, "蓝": 9, "黄": 8, "彩": 1, "同模板组合": 8})
+        self.assertEqual(counts, {"白": 1, "蓝": 9, "黄": 10, "彩": 1, "同模板组合": 9})
         self.assertEqual(
             loaded.same_template_candidates["蓝·半步满级+满级玩家"],
             ("蓝·半步满级", "蓝·满级玩家"),
@@ -86,6 +87,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             loaded.same_template_candidates["黄·终极反击"],
             ("黄·终极反击", "黄·学术反击"),
+        )
+        self.assertEqual(
+            loaded.same_template_candidates["黄·蛋商银行"],
+            ("黄·大亨", "黄·蛋商银行"),
         )
         # Candidate names remain real names; CARD_LABEL_ALIASES is not applied.
         self.assertIn("蓝·最佳拍档", loaded.by_color["蓝"])
@@ -107,6 +112,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             mapping["黄·摇盒高手"],
             ("黄·死亡摇滚", "黄·摇盒高手"),
+        )
+        self.assertEqual(
+            mapping["黄·蛋商银行"],
+            ("黄·大亨", "黄·蛋商银行"),
         )
 
     def test_sync_preserves_details_and_manual_group_until_force(self) -> None:

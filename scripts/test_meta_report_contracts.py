@@ -1291,6 +1291,16 @@ class MetaReportContractTests(unittest.TestCase):
 
         self.assertIn("黄·摇盒高手", yellow_catalog)
 
+    def test_yellow_egg_bank_template_expands_to_two_logical_catalog_keys(self) -> None:
+        self.assertEqual(
+            MODULE.MERGED_TEMPLATE_EXPANSIONS["黄·蛋商银行"],
+            ["黄·大亨", "黄·蛋商银行"],
+        )
+
+        yellow_catalog = MODULE.load_report_card_catalog()["黄"]
+        self.assertIn("黄·大亨", yellow_catalog)
+        self.assertIn("黄·蛋商银行", yellow_catalog)
+
     def test_report_catalog_contains_only_concrete_reporting_names(self) -> None:
         blue_catalog = MODULE.load_report_card_catalog()["蓝"]
         self.assertIn("蓝·最佳拍档", blue_catalog)

@@ -47,6 +47,10 @@ DEFAULT_SAME_TEMPLATE_GROUPS: dict[str, tuple[str, ...]] = {
         "黄·终极反击",
         "黄·学术反击",
     ),
+    "黄·蛋商银行": (
+        "黄·大亨",
+        "黄·蛋商银行",
+    ),
 }
 
 
