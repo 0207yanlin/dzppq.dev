@@ -85,6 +85,59 @@ def feature(
 
 
 class MetaCompositionTests(unittest.TestCase):
+    def test_composition_screenshot_samples_prefer_recent_batches_and_cap_each_stage(self) -> None:
+        mature_features = []
+        for player_id, batch in enumerate(
+            ("0729", "0730", "0731", "0801", "0802", "0803", "0804", "0805", "0806", "0807", "0807"),
+            start=1,
+        ):
+            member = feature(player_id, [hero(f"成熟棋子{player_id}")])
+            member.rank = 1
+            member.match_batch = batch
+            member.screenshot_path = f"screenshots.{batch}/mature-{player_id}.png"
+            mature_features.append(member)
+
+        duplicate = feature(99, [hero("重复截图")])
+        duplicate.rank = 1
+        duplicate.match_batch = "0807"
+        duplicate.screenshot_path = mature_features[-1].screenshot_path
+        mature_features.append(duplicate)
+
+        transition_features = []
+        for player_id, batch in enumerate(
+            ("0731", "0801", "0802", "0803", "0804", "0805", "0806", "0807", "0807", "0807", "0807"),
+            start=101,
+        ):
+            member = feature(player_id, [hero(f"过渡棋子{player_id}")])
+            member.rank = 1
+            member.match_batch = batch
+            member.screenshot_path = f"screenshots.{batch}/transition-{player_id}.png"
+            transition_features.append(member)
+
+        comp = {
+            "mature_member_player_ids": [member.player_id for member in mature_features],
+            "transition_stages": [
+                {"member_player_ids": [member.player_id for member in transition_features]}
+            ],
+        }
+        MODULE.attach_composition_screenshot_samples(
+            [comp], mature_features + transition_features
+        )
+
+        mature_samples = comp["raw_screenshot_samples"]["mature"]
+        transition_samples = comp["raw_screenshot_samples"]["transition"]
+        self.assertEqual(len(mature_samples), 10)
+        self.assertEqual(len(transition_samples), 10)
+        self.assertEqual(mature_samples[0]["match_batch"], "0807")
+        self.assertEqual(transition_samples[0]["match_batch"], "0807")
+        self.assertEqual(
+            len({sample["screenshot_path"] for sample in mature_samples}),
+            len(mature_samples),
+        )
+        self.assertNotIn("screenshots.0729/mature-1.png", {
+            sample["screenshot_path"] for sample in mature_samples
+        })
+
     def test_food_archetype_recognizes_all_harvest_prefixes(self) -> None:
         investment = {"stable_traits": [], "scattered_active_traits": 0, "traits": [], "dominant_trait": None}
         for equipment, normalized in (

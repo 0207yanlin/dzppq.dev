@@ -38,7 +38,7 @@ DEFAULT_INTERACTIVE_HTML = ROOT / "data" / "环境分析详情.html"
 DEFAULT_XLSX = ROOT / "data" / "latest_meta_analysis_equipment.xlsx"
 DEFAULT_HERO_EQUIPMENT_DIR = ROOT / "data" / "hero-equipment"
 DEFAULT_COMPOSITION_SCREENSHOT_DIR = ROOT / "data" / "composition-screenshots"
-COMPOSITION_SCREENSHOT_SAMPLE_LIMIT = 3
+COMPOSITION_SCREENSHOT_SAMPLE_LIMIT = 10
 CARD_HTML_SUFFIXES = {
     "彩": "cai",
     "黄": "yellow",
@@ -3354,9 +3354,9 @@ def attach_composition_screenshot_samples(
                         _screenshot_file_path(feature.screenshot_path)
                         and _screenshot_file_path(feature.screenshot_path).is_file()
                     ),
+                    -batch_ordinal(feature.match_batch),
                     feature.rank,
                     -feature.level,
-                    feature.match_batch or "",
                     feature.player_id,
                 )
             )

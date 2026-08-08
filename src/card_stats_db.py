@@ -16,7 +16,8 @@ from src.runtime_paths import project_root
 
 StatItem = tuple[str, int, float]
 DEFAULT_RECENCY_HALF_LIFE_DAYS = 2.0
-MIN_RECENCY_WEIGHT = 0.25
+MIN_RECENCY_WEIGHT = 0.0
+DEFAULT_LOOKBACK_DAYS = 10
 ADJUSTED_RANK_PRIOR = 8
 CARD_PREFIX_TYPES = ("彩", "黄", "蓝", "白", "其他")
 MIN_CARD_STATS_DATE = date(2026, 7, 27)
@@ -108,6 +109,53 @@ def _is_supported_batch(batch: str | None) -> bool:
     return inferred is not None and inferred >= MIN_CARD_STATS_DATE
 
 
+def _select_analysis_batches(
+    batches: set[str],
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    reference_date: date | None = None,
+) -> tuple[set[str], dict[str, Any]]:
+    """Select the same natural-day window used by the HTML analyzer."""
+    if lookback_days < 1:
+        raise ValueError("lookback_days must be >= 1")
+
+    dated_batches = [
+        (batch, inferred)
+        for batch in batches
+        if (inferred := _batch_date(batch, reference_date)) is not None
+        and inferred >= MIN_CARD_STATS_DATE
+    ]
+    if not dated_batches:
+        return set(), {
+            "lookback_days": lookback_days,
+            "latest_batch": None,
+            "start_batch": None,
+            "start_date": None,
+            "end_date": None,
+            "batch_range": [],
+        }
+
+    latest_batch, latest_date = max(dated_batches, key=lambda item: item[1])
+    start_date = latest_date - timedelta(days=lookback_days - 1)
+    selected = {
+        batch
+        for batch, batch_date in dated_batches
+        if start_date <= batch_date <= latest_date
+    }
+    ordered = sorted(
+        selected,
+        key=lambda batch: _batch_date(batch, reference_date) or date.min,
+    )
+    return selected, {
+        "lookback_days": lookback_days,
+        "latest_batch": latest_batch,
+        "start_batch": start_date.strftime("%m%d"),
+        "start_date": start_date.isoformat(),
+        "end_date": latest_date.isoformat(),
+        "batch_range": [ordered[0], ordered[-1]] if ordered else [],
+    }
+
+
 def _card_prefix_type(card_name: str) -> str:
     prefix, _ = split_card_prefix(card_name)
     if prefix:
@@ -149,19 +197,26 @@ def _compute_sample_weights(
     *,
     half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
     min_weight: float = MIN_RECENCY_WEIGHT,
+    reference_date: date | None = None,
 ) -> None:
-    batches = {record.match_batch for record in records if record.match_batch}
-    if not batches:
+    dated_records = [
+        (record, _batch_date(record.match_batch, reference_date))
+        for record in records
+    ]
+    latest_date = max(
+        (batch_date for _, batch_date in dated_records if batch_date is not None),
+        default=None,
+    )
+    if latest_date is None:
         for record in records:
             record.sample_weight = 1.0
         return
-    max_ord = max(_batch_ordinal(batch) for batch in batches)
     decay = 0.6931471805599453 / max(half_life_days, 1e-6)
-    for record in records:
-        if not record.match_batch:
+    for record, batch_date in dated_records:
+        if batch_date is None:
             record.sample_weight = min_weight
             continue
-        days_ago = max(max_ord - _batch_ordinal(record.match_batch), 0)
+        days_ago = max((latest_date - batch_date).days, 0)
         record.sample_weight = max(min_weight, 2.718281828459045 ** (-decay * days_ago))
 
 
@@ -196,16 +251,36 @@ def _team_rank_value(record: PlayerCardRecord) -> int:
     return record.team_rank if record.team_rank is not None else record.rank
 
 
-def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> list[PlayerCardRecord]:
+def _load_player_card_records(
+    conn: sqlite3.Connection,
+    bot_ids: set[int],
+) -> tuple[list[PlayerCardRecord], dict[str, Any]]:
     ensure_match_schema(conn)
-    match_meta = {
+    all_match_meta = {
         int(row["id"]): {
             "path": row["path"],
             "match_date": row["match_date"],
         }
         for row in conn.execute("SELECT id, path, match_date FROM matches").fetchall()
-        if _is_supported_batch(row["match_date"] or parse_match_batch(row["path"]))
     }
+    supported_meta = {
+        match_id: meta
+        for match_id, meta in all_match_meta.items()
+        if _is_supported_batch(meta["match_date"] or parse_match_batch(meta["path"]))
+    }
+    selected_batches, analysis_window = _select_analysis_batches(
+        {
+            meta["match_date"] or parse_match_batch(meta["path"])
+            for meta in supported_meta.values()
+            if meta["match_date"] or parse_match_batch(meta["path"])
+        }
+    )
+    match_meta = {
+        match_id: meta
+        for match_id, meta in supported_meta.items()
+        if (meta["match_date"] or parse_match_batch(meta["path"])) in selected_batches
+    }
+    analysis_window["source_matches"] = len(supported_meta)
     player_rows = [
         row
         for row in conn.execute("SELECT * FROM players ORDER BY match_id, rank").fetchall()
@@ -301,9 +376,25 @@ def _load_player_card_records(conn: sqlite3.Connection, bot_ids: set[int]) -> li
                 match_batch=match_batch,
             )
         )
-    _compute_sample_weights(records)
+    _compute_sample_weights(
+        records,
+        reference_date=date.fromisoformat(analysis_window["end_date"])
+        if analysis_window["end_date"]
+        else None,
+    )
     _assign_team_ranks(records)
-    return records
+    analysis_window["source_players"] = len(
+        {
+            int(row["id"])
+            for row in conn.execute("SELECT id, match_id FROM players").fetchall()
+            if int(row["match_id"]) in supported_meta and int(row["id"]) not in bot_ids
+        }
+    )
+    analysis_window["included_players"] = len(records)
+    analysis_window["excluded_players"] = (
+        analysis_window["source_players"] - analysis_window["included_players"]
+    )
+    return records, analysis_window
 
 
 def _aggregate_stats(
@@ -404,7 +495,7 @@ def build_card_stats_payload(db_path: Path | str) -> dict[str, Any]:
     conn.row_factory = sqlite3.Row
     try:
         bot_ids = find_bot_player_ids(conn)
-        records = _load_player_card_records(conn, bot_ids)
+        records, analysis_window = _load_player_card_records(conn, bot_ids)
         if not records:
             raise ValueError(
                 f"No usable player records on or after {MIN_CARD_STATS_DATE.isoformat()} "
@@ -446,7 +537,19 @@ def build_card_stats_payload(db_path: Path | str) -> dict[str, Any]:
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "data_source": _rel(path),
-            "overview": {"quality": quality},
+            "overview": {
+                "quality": quality,
+                "analysis_window": analysis_window,
+            },
+            "methodology": {
+                "recency_weighting": {
+                    "enabled": True,
+                    "half_life_days": DEFAULT_RECENCY_HALF_LIFE_DAYS,
+                    "min_weight": MIN_RECENCY_WEIGHT,
+                    "latest_batch": analysis_window["latest_batch"],
+                    "batch_range": analysis_window["batch_range"],
+                }
+            },
             "rankings": {
                 "cards": {
                     "single_cards_by_prefix": single_by_prefix,

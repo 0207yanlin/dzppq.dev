@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +24,12 @@ from src.card_pick_recommend import (  # noqa: E402
     fuzzy_match_card,
     format_recommendation,
 )
-from src.card_stats_db import build_card_stats_payload  # noqa: E402
+from src.card_stats_db import (  # noqa: E402
+    PlayerCardRecord,
+    _compute_sample_weights,
+    _select_analysis_batches,
+    build_card_stats_payload,
+)
 from src.layout import HAND_CARD_BOXES, hand_card_roi  # noqa: E402
 from src.match_db import import_ground_truth, init_match_db, insert_match_entry  # noqa: E402
 from src.runtime_paths import (  # noqa: E402
@@ -694,6 +700,36 @@ def test_card_stats_index_from_db_path(tmp_path: Path) -> None:
     assert normal_sss.appearances == 1
     assert pro_sss.appearances == 1
     assert stats.get_metrics("蓝·一起刷刷刷+天降揪揪pro", "蓝") is None
+
+
+def test_card_stats_window_matches_html_natural_ten_day_rule() -> None:
+    selected, metadata = _select_analysis_batches(
+        {"0727", "0728", "0729", "0807"},
+        reference_date=date(2026, 8, 8),
+    )
+    assert selected == {"0729", "0807"}
+    assert metadata["start_batch"] == "0729"
+    assert metadata["latest_batch"] == "0807"
+    assert metadata["batch_range"] == ["0729", "0807"]
+
+
+def test_card_stats_recency_weight_has_no_permanent_floor() -> None:
+    records = [
+        PlayerCardRecord(1, 1, 1, None, match_batch="0727"),
+        PlayerCardRecord(2, 2, 1, None, match_batch="0807"),
+    ]
+    _compute_sample_weights(records, reference_date=date(2026, 8, 7))
+    assert records[1].sample_weight == 1.0
+    assert records[0].sample_weight < 0.25
+
+
+def test_card_stats_payload_exposes_analysis_window(tmp_path: Path) -> None:
+    payload = build_card_stats_payload(_build_card_stats_db(tmp_path))
+    window = payload["overview"]["analysis_window"]
+    assert window["lookback_days"] == 10
+    assert window["latest_batch"] == "0728"
+    assert window["start_batch"] == "0719"
+    assert payload["methodology"]["recency_weighting"]["min_weight"] == 0.0
 
 
 def test_detail_ocr_gt_survives_import_and_card_stats(tmp_path: Path) -> None:
