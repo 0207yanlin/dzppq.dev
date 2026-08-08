@@ -27,6 +27,8 @@ from src.card_details import (  # noqa: E402
 
 ASSETS = (
     "白·普通卡",
+    "白·中坚力量",
+    "白·小而美",
     "蓝·普通卡",
     "蓝·半步满级+满级玩家",
     "蓝·重质拍档支援",
@@ -67,7 +69,15 @@ class CardDetailsWorkbookTests(unittest.TestCase):
             self.workbook_path,
             template_dir=self.template_dir,
         )
-        self.assertEqual(counts, {"白": 1, "蓝": 9, "黄": 10, "彩": 1, "同模板组合": 9})
+        self.assertEqual(counts, {"白": 6, "蓝": 9, "黄": 10, "彩": 1, "同模板组合": 11})
+        self.assertEqual(
+            loaded.same_template_candidates["白·中坚力量"],
+            ("白·中坚力量", "白·威力代价", "白·后院"),
+        )
+        self.assertEqual(
+            loaded.same_template_candidates["白·小而美"],
+            ("白·小而美", "白·法力专注"),
+        )
         self.assertEqual(
             loaded.same_template_candidates["蓝·半步满级+满级玩家"],
             ("蓝·半步满级", "蓝·满级玩家"),
@@ -116,6 +126,14 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             mapping["黄·蛋商银行"],
             ("黄·大亨", "黄·蛋商银行"),
+        )
+        self.assertEqual(
+            mapping["白·中坚力量"],
+            ("白·中坚力量", "白·威力代价", "白·后院"),
+        )
+        self.assertEqual(
+            mapping["白·小而美"],
+            ("白·小而美", "白·法力专注"),
         )
 
     def test_sync_preserves_details_and_manual_group_until_force(self) -> None:
@@ -219,6 +237,9 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertIn("蓝·半步满级", loaded.by_color["蓝"])
         self.assertIn("蓝·满级玩家", loaded.by_color["蓝"])
         self.assertIn("黄·迅迅迅捷双剑", loaded.by_color["黄"])
+        self.assertIn("白·威力代价", loaded.by_color["白"])
+        self.assertIn("白·后院", loaded.by_color["白"])
+        self.assertIn("白·法力专注", loaded.by_color["白"])
 
 
 if __name__ == "__main__":

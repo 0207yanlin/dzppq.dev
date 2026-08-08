@@ -13,6 +13,15 @@ CARD_COLORS: tuple[str, ...] = ("白", "蓝", "黄", "彩")
 # These are game card names, not reporting aliases.  Keep visually identical
 # cards distinct here so details can be maintained for each real card.
 DEFAULT_SAME_TEMPLATE_GROUPS: dict[str, tuple[str, ...]] = {
+    "白·中坚力量": (
+        "白·中坚力量",
+        "白·威力代价",
+        "白·后院",
+    ),
+    "白·小而美": (
+        "白·小而美",
+        "白·法力专注",
+    ),
     "蓝·半步满级+满级玩家": (
         "蓝·半步满级",
         "蓝·满级玩家",
