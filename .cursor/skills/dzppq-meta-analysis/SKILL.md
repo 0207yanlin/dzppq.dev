@@ -26,7 +26,7 @@ Use `--db <path>` when the user provides a database. If the user provides balanc
 4. Base the final answer on `data/环境分析详情.html`, `data/latest_meta_analysis_report.md`, `data/latest_meta_analysis.json`, `data/latest_meta_analysis_equipment.xlsx`, and per-hero pages under `data/hero-equipment/`.
 5. Mention data quality caveats: sample size, unknown labels, excluded bot records, and low-confidence segments.
 
-Per-hero equipment tables are exported to Excel and standalone HTML pages under `data/hero-equipment/`. The interactive dashboard and Markdown report keep a short carry overview and link to those files. Use panel hash anchors such as `#equipment`, `#super-equipment`, `#food-equipment`, `#compositions`, and `#primary-bond` to jump to panels inside `data/环境分析详情.html`. Clicking a hero name in the equipment panel opens that hero's detail page in a new browser tab.
+Per-hero equipment tables are exported to Excel and standalone HTML pages under `data/hero-equipment/`. The interactive dashboard and Markdown report keep a short carry overview and link to those files. Use panel hash anchors such as `#equipment`, `#super-equipment`, `#food-equipment`, `#super-equipment-matches`, `#selected-equipment-matches`, `#compositions`, and `#primary-bond` to jump to panels inside `data/环境分析详情.html`. Clicking a hero name in the equipment panel opens that hero's detail page in a new browser tab.
 
 Do not use older report files as the primary source. Older scripts in `scripts/` and `src/meta_analysis.py` are historical references only unless the user explicitly asks to compare with them.
 
@@ -71,7 +71,7 @@ Write concise Chinese conclusions. Include:
 
 - Separate `赌狗` and `高费` comp recommendations with concrete 7/8/9-level hero lists when data supports them. Output all discovered strategies in each style. True `高费拼多多` comps rely on 2-star 4/5-cost carries without low-cost 3-stars.
 - Show archetype labels (`美食社收菜`, `高费拼多多`, etc.), archetype evidence (including low-cost 3-star count and main-carry cost/stars for high-cost PDD), mature vs transition performance, inversion diagnostics, low-confidence notes, trend, raw/weighted/`n_eff`, confidence evidence, score breakdown, and cluster/merge reasons in Markdown and HTML comp panels.
-- Interactive HTML dashboard at `data/环境分析详情.html` with tabbed panels for comp details, equipment, super equipment, food equipment, cards, jiujiu, traps, duo synergy, low-cost carry difficulty, and primary bond strength.
+- Interactive HTML dashboard at `data/环境分析详情.html` with tabbed panels for comp details, equipment, super equipment, food equipment, super-equipment matches, selected-equipment matches, cards, jiujiu, traps, duo synergy, low-cost carry difficulty, and primary bond strength.
 - Composition panel filters are only `全部` / `赌狗` / `高费`; do not add zone or archetype filter rows.
 - Excel equipment workbook at `data/latest_meta_analysis_equipment.xlsx` for per-hero and per-comp equipment detail, plus super/food equipment rankings.
 - Hero equipment recommendations split normal items, `recommended_super_items`, and `recommended_food_items`; dedicated dashboard panels rank each special class with recommended wearers.

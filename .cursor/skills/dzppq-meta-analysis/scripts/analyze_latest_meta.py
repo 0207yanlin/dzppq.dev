@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote
 
 
@@ -66,6 +66,8 @@ INTERACTIVE_PANELS: list[tuple[str, str, str]] = [
     ("equipment", "英雄出装推荐", "equipment"),
     ("super-equipment", "超级装备强度", "super_equipment"),
     ("food-equipment", "美食社装备强度", "food_equipment"),
+    ("super-equipment-matches", "超级装备局", "super_equipment_matches"),
+    ("selected-equipment-matches", "核选装备局", "selected_equipment_matches"),
     ("cards-cai", "彩卡强度排行", "cards_cai"),
     ("cards-yellow", "黄卡强度排行", "cards_yellow"),
     ("cards-blue", "蓝卡强度排行", "cards_blue"),
@@ -76,6 +78,9 @@ INTERACTIVE_PANELS: list[tuple[str, str, str]] = [
     ("jiujiu-wearers", "啾啾佩戴推荐", "jiujiu_wearers"),
     ("traps", "版本陷阱阵容", "trap_compositions"),
 ]
+CARD_COMPOSITION_MIN_APPS = 3
+CARD_COMPOSITION_RELIABLE_MIN = 5
+CARD_COMPOSITION_TOP_N = 8
 SUPER_EQUIPMENT_NAMES = frozenset(
     {
         "巫术玩偶",
@@ -93,6 +98,8 @@ FOOD_SPECIAL_EQUIPMENT_NAMES = frozenset({"杏仁豆腐", "椒盐酥糖", "岛�
 FOOD_HARVEST_PREFIXES = ("美味", "绝味", "暗黑")
 SPECIAL_EQUIPMENT_RELIABLE_MIN = 8
 SPECIAL_EQUIPMENT_WEARER_MIN = 3
+# After excluding paired rank-7/8 bots, a complete 8-player lobby typically keeps 6 players.
+MIN_PLAYERS_FOR_EQUIPMENT_MATCH_SCOPE = 6
 DEFAULT_RECENCY_HALF_LIFE_DAYS = 2.0
 DEFAULT_LOOKBACK_DAYS = 10
 MIN_RECENCY_WEIGHT = 0.0
@@ -523,6 +530,50 @@ def equipment_kind(name: str) -> str:
     if normalized.endswith("啾啾"):
         return "jiujiu"
     return "normal"
+
+
+def player_has_super_equipment(feature: PlayerFeature) -> bool:
+    return any(
+        is_super_equipment(equipment.name)
+        for hero in feature.heroes
+        for equipment in hero.equipments
+    )
+
+
+def player_has_selected_equipment(feature: PlayerFeature) -> bool:
+    return any(equipment.selected for hero in feature.heroes for equipment in hero.equipments)
+
+
+def filter_features_by_match_equipment_scope(
+    features: list[PlayerFeature],
+    predicate: Callable[[PlayerFeature], bool],
+    *,
+    min_players: int = MIN_PLAYERS_FOR_EQUIPMENT_MATCH_SCOPE,
+) -> tuple[list[PlayerFeature], dict[str, Any]]:
+    """Keep only matches where every retained player satisfies the equipment predicate."""
+    features_by_match: dict[int, list[PlayerFeature]] = defaultdict(list)
+    for feature in features:
+        features_by_match[feature.match_id].append(feature)
+
+    kept: list[PlayerFeature] = []
+    kept_match_ids: list[int] = []
+    incomplete_matches = 0
+    for match_id, members in features_by_match.items():
+        if len(members) < min_players:
+            incomplete_matches += 1
+            continue
+        if all(predicate(member) for member in members):
+            kept.extend(members)
+            kept_match_ids.append(match_id)
+
+    return kept, {
+        "match_count": len(kept_match_ids),
+        "player_count": len(kept),
+        "source_match_count": len(features_by_match),
+        "source_player_count": len(features),
+        "incomplete_matches_excluded": incomplete_matches,
+        "min_players": min_players,
+    }
 
 
 def card_prefix_type(card_name: str) -> str:
@@ -3921,6 +3972,173 @@ def analyze_cards(
     }
 
 
+def card_composition_detail_slug(card_name: str) -> str:
+    """Stable URL-safe slug for card → composition deep links."""
+    return quote(str(card_name), safe="")
+
+
+def card_composition_panel_hash(card_name: str, *, slug: str | None = None) -> str:
+    """Hash that opens the card-compositions panel focused on one card."""
+    encoded = slug or card_composition_detail_slug(card_name)
+    return f"card-compositions?card={encoded}"
+
+
+def build_card_composition_recommendations(
+    features: list[PlayerFeature],
+    comp_rows: list[dict[str, Any]],
+    baseline: float,
+    *,
+    min_pair_apps: int = CARD_COMPOSITION_MIN_APPS,
+) -> list[dict[str, Any]]:
+    """Invert card holdings onto strategy-level recommendations.
+
+    Each concrete card name is kept independent. Mature and transition boards of the
+    same strategy are merged into one display row; ranking prefers mature-stage
+    with-card performance when that sample is large enough.
+    """
+    family_by_id = {int(row["family_id"]): row for row in comp_rows if row.get("family_id") is not None}
+    mature_ids_by_family = {
+        family_id: set(row.get("mature_member_player_ids") or [])
+        for family_id, row in family_by_id.items()
+    }
+    card_stats: dict[str, RankStats] = defaultdict(RankStats)
+    pair_stats: dict[tuple[str, int], RankStats] = defaultdict(RankStats)
+    mature_pair_stats: dict[tuple[str, int], RankStats] = defaultdict(RankStats)
+
+    for feature in features:
+        weight = feature.sample_weight
+        for card in sorted(set(feature.cards)):
+            if not card or card == "unknown":
+                continue
+            card_stats[card].add(feature.rank, weight)
+        family_id = feature.family_id
+        if family_id is None or family_id not in family_by_id:
+            continue
+        is_mature = feature.player_id in mature_ids_by_family.get(family_id, set())
+        for card in sorted(set(feature.cards)):
+            if not card or card == "unknown":
+                continue
+            pair_key = (card, int(family_id))
+            pair_stats[pair_key].add(feature.rank, weight)
+            if is_mature:
+                mature_pair_stats[pair_key].add(feature.rank, weight)
+
+    recommendations: list[dict[str, Any]] = []
+    for card_name, total_stat in card_stats.items():
+        if total_stat.appearances <= 0:
+            continue
+        total_dict = total_stat.to_dict(baseline_rank=baseline, prior=8)
+        comps: list[dict[str, Any]] = []
+        for (pair_card, family_id), pair_stat in pair_stats.items():
+            if pair_card != card_name or pair_stat.appearances < min_pair_apps:
+                continue
+            strategy = family_by_id.get(family_id)
+            if strategy is None:
+                continue
+            pair_dict = pair_stat.to_dict(baseline_rank=baseline, prior=6)
+            mature_stat = mature_pair_stats.get((card_name, family_id), RankStats())
+            mature_dict = (
+                mature_stat.to_dict(baseline_rank=baseline, prior=6)
+                if mature_stat.appearances > 0
+                else None
+            )
+            use_mature = bool(
+                mature_dict
+                and mature_stat.appearances >= CARD_COMPOSITION_MIN_APPS
+            )
+            rank_source = mature_dict if use_mature else pair_dict
+            strategy_stats = strategy.get("mature_stats") or strategy.get("stats") or {}
+            low_notes: list[str] = []
+            if pair_stat.appearances < CARD_COMPOSITION_RELIABLE_MIN:
+                low_notes.append(
+                    f"持卡样本偏少（n={pair_stat.appearances}，建议>={CARD_COMPOSITION_RELIABLE_MIN}）"
+                )
+            if strategy.get("confidence") == "低":
+                low_notes.append("策略整体置信度偏低")
+            confidence_evidence = strategy.get("confidence_evidence") or {}
+            if confidence_evidence.get("eligible") is False:
+                fail_reasons = confidence_evidence.get("failure_reasons") or []
+                if fail_reasons:
+                    low_notes.append("策略正式置信未通过：" + "；".join(str(item) for item in fail_reasons[:2]))
+                else:
+                    low_notes.append("策略正式置信未通过")
+            comps.append(
+                {
+                    "family_id": family_id,
+                    "family_label": strategy.get("label", str(family_id)),
+                    "play_style": strategy.get("play_style", "高费"),
+                    "archetype": strategy.get("archetype"),
+                    "main_bond": strategy.get("main_bond"),
+                    "appearances": pair_dict["appearances"],
+                    "weighted_appearances": pair_dict.get("weighted_appearances"),
+                    "n_eff": pair_dict.get("n_eff"),
+                    "avg_rank": pair_dict["avg_rank"],
+                    "top4_rate": pair_dict["top4_rate"],
+                    "win_rate": pair_dict["win_rate"],
+                    "adjusted_avg_rank": pair_dict["adjusted_avg_rank"],
+                    "share": round(
+                        pair_dict["appearances"] * 100.0 / max(total_dict["appearances"], 1),
+                        1,
+                    ),
+                    "mature_appearances": mature_dict["appearances"] if mature_dict else 0,
+                    "mature_avg_rank": mature_dict["avg_rank"] if mature_dict else None,
+                    "mature_top4_rate": mature_dict["top4_rate"] if mature_dict else None,
+                    "mature_adjusted_avg_rank": (
+                        mature_dict["adjusted_avg_rank"] if mature_dict else None
+                    ),
+                    "rank_basis": "mature" if use_mature else "aggregate",
+                    "rank_avg_rank": rank_source["avg_rank"],
+                    "rank_top4_rate": rank_source["top4_rate"],
+                    "rank_adjusted_avg_rank": rank_source["adjusted_avg_rank"],
+                    "strategy_avg_rank": strategy_stats.get("avg_rank"),
+                    "strategy_top4_rate": strategy_stats.get("top4_rate"),
+                    "strategy_appearances": strategy_stats.get("appearances"),
+                    "recommendation_score": strategy.get("recommendation_score"),
+                    "strength_rank": strategy.get("strength_rank"),
+                    "confidence": strategy.get("confidence", "低"),
+                    "low_confidence_notes": low_notes,
+                }
+            )
+        comps.sort(
+            key=lambda row: (
+                row.get("rank_adjusted_avg_rank", 99),
+                row.get("rank_avg_rank", 99),
+                -row.get("rank_top4_rate", 0),
+                -row.get("appearances", 0),
+                row.get("family_label", ""),
+            )
+        )
+        recommendations.append(
+            {
+                "card_name": card_name,
+                "prefix_type": card_prefix_type(card_name),
+                "detail_slug": card_composition_detail_slug(card_name),
+                "panel_hash": card_composition_panel_hash(card_name),
+                "appearances": total_dict["appearances"],
+                "weighted_appearances": total_dict.get("weighted_appearances"),
+                "n_eff": total_dict.get("n_eff"),
+                "avg_rank": total_dict["avg_rank"],
+                "top4_rate": total_dict["top4_rate"],
+                "win_rate": total_dict["win_rate"],
+                "adjusted_avg_rank": total_dict["adjusted_avg_rank"],
+                "recommended_comps": comps[:CARD_COMPOSITION_TOP_N],
+                "comp_count": len(comps),
+            }
+        )
+
+    recommendations.sort(
+        key=lambda row: (
+            CARD_PREFIX_TYPES.index(row["prefix_type"])
+            if row["prefix_type"] in CARD_PREFIX_TYPES
+            else 99,
+            -row["appearances"],
+            row.get("adjusted_avg_rank", 99),
+            row["card_name"],
+        )
+    )
+    return recommendations
+
+
 def analyze_heroes_and_equipment(
     features: list[PlayerFeature],
     min_apps: int,
@@ -4231,6 +4449,188 @@ def analyze_special_equipment(
         "catalog": catalog,
         "rankings": rankings,
     }
+
+
+def analyze_selected_equipment(
+    features: list[PlayerFeature],
+    baseline: float,
+    *,
+    min_apps: int = 1,
+) -> dict[str, Any]:
+    """Rank normalized equipment names using only 核选 (selected) pieces."""
+    item_stats: dict[str, RankStats] = defaultdict(RankStats)
+    item_selected: Counter[str] = Counter()
+    item_total: Counter[str] = Counter()
+    hero_item_stats: dict[tuple[str, str], RankStats] = defaultdict(RankStats)
+
+    for feature in features:
+        seen_selected: set[str] = set()
+        for hero in feature.heroes:
+            for equipment in hero.equipments:
+                item_name = equipment.name
+                item_total[item_name] += 1
+                if not equipment.selected:
+                    continue
+                item_selected[item_name] += 1
+                hero_item_stats[(item_name, hero.name)].add(feature.rank, feature.sample_weight)
+                if item_name in seen_selected:
+                    continue
+                seen_selected.add(item_name)
+                item_stats[item_name].add(feature.rank, feature.sample_weight)
+
+    rankings: list[dict[str, Any]] = []
+    for item_name, stat in item_stats.items():
+        if stat.appearances < min_apps:
+            continue
+        stats = stat.to_dict(baseline_rank=baseline, prior=8)
+        wearer_min = (
+            1
+            if stats["appearances"] < SPECIAL_EQUIPMENT_RELIABLE_MIN
+            else SPECIAL_EQUIPMENT_WEARER_MIN
+        )
+        wearers: list[dict[str, Any]] = []
+        for (wearer_item, hero_name), wearer_stat in hero_item_stats.items():
+            if wearer_item != item_name or wearer_stat.appearances < wearer_min:
+                continue
+            wearers.append(
+                {
+                    "hero_name": hero_name,
+                    **wearer_stat.to_dict(baseline_rank=baseline, prior=6),
+                    "share": round(
+                        wearer_stat.appearances * 100.0 / max(stat.appearances, 1),
+                        1,
+                    ),
+                }
+            )
+        wearers.sort(
+            key=lambda row: (
+                -row["appearances"],
+                row.get("adjusted_avg_rank", 99),
+                -row.get("top4_rate", 0),
+            )
+        )
+        confidence = special_equipment_confidence(
+            stats["appearances"],
+            float(stats.get("n_eff") or 0.0),
+        )
+        sample_quality = (
+            "高样本"
+            if stats["appearances"] >= SPECIAL_EQUIPMENT_RELIABLE_MIN
+            else "低样本观察"
+        )
+        note = "样本不足，仅供观察" if confidence == "低" else ""
+        selected_rate = (
+            item_selected[item_name] * 100.0 / item_total[item_name]
+            if item_total[item_name]
+            else 100.0
+        )
+        rankings.append(
+            {
+                "equipment_name": item_name,
+                "equipment_kind": equipment_kind(item_name),
+                **stats,
+                "selected_rate": round(selected_rate, 1),
+                "confidence": confidence,
+                "sample_quality": sample_quality,
+                "note": note,
+                "recommended_wearers": wearers[:5],
+            }
+        )
+
+    rankings.sort(
+        key=lambda row: (
+            0 if row["appearances"] >= SPECIAL_EQUIPMENT_RELIABLE_MIN else 1,
+            row.get("adjusted_avg_rank") if row.get("adjusted_avg_rank") is not None else 99,
+            -(row.get("top4_rate") or 0),
+            -row["appearances"],
+            row["equipment_name"],
+        )
+    )
+    for index, row in enumerate(rankings, start=1):
+        row["strength_rank"] = index
+    return {
+        "definition": (
+            "仅统计名称以「核选」开头的装备（归一化后与普通装备同名）；"
+            "排序优先修正名次，高样本优先于低样本观察。"
+        ),
+        "catalog": [],
+        "rankings": rankings,
+    }
+
+
+def analyze_super_equipment_matches(
+    features: list[PlayerFeature],
+    baseline: float,
+) -> dict[str, Any]:
+    """Rank super equipment inside matches where every retained player owns one."""
+    scoped, scope = filter_features_by_match_equipment_scope(
+        features,
+        player_has_super_equipment,
+    )
+    scoped_baseline = (
+        sum(feature.rank * feature.sample_weight for feature in scoped)
+        / max(sum(feature.sample_weight for feature in scoped), 1e-9)
+        if scoped
+        else baseline
+    )
+    result = analyze_special_equipment(
+        scoped,
+        scoped_baseline,
+        kind="super",
+        always_include=SUPER_EQUIPMENT_NAMES,
+    )
+    result["definition"] = (
+        "超级装备局：该场对战所有已保留玩家均有至少一件超级装备白名单装备；"
+        f"至少 {scope['min_players']} 名已保留玩家才计入，避免残缺 OCR 放大。"
+        "排序优先修正名次，高样本优先于低样本观察。"
+    )
+    result["scope"] = {
+        **scope,
+        "filter": "all_retained_players_have_super_equipment",
+        "baseline_rank": round(scoped_baseline, 3) if scoped else None,
+    }
+    if not scoped:
+        result["note"] = "当前窗口内没有满足「全员持有超级装备」的完整对局。"
+    elif scope["match_count"] < 5:
+        result["note"] = "超级装备局样本偏少，排名仅供观察。"
+    else:
+        result["note"] = ""
+    return result
+
+
+def analyze_selected_equipment_matches(
+    features: list[PlayerFeature],
+    baseline: float,
+) -> dict[str, Any]:
+    """Rank 核选 equipment inside matches where every retained player owns one."""
+    scoped, scope = filter_features_by_match_equipment_scope(
+        features,
+        player_has_selected_equipment,
+    )
+    scoped_baseline = (
+        sum(feature.rank * feature.sample_weight for feature in scoped)
+        / max(sum(feature.sample_weight for feature in scoped), 1e-9)
+        if scoped
+        else baseline
+    )
+    result = analyze_selected_equipment(scoped, scoped_baseline)
+    result["definition"] = (
+        "核选装备局：该场对战所有已保留玩家均有至少一件核选装备；"
+        f"至少 {scope['min_players']} 名已保留玩家才计入，避免残缺 OCR 放大。"
+        "强度按归一化装备名统计核选件，并保留核选占比。"
+    )
+    result["scope"] = {
+        **scope,
+        "filter": "all_retained_players_have_selected_equipment",
+        "baseline_rank": round(scoped_baseline, 3) if scoped else None,
+    }
+    if not scoped:
+        result["note"] = "当前窗口内没有满足「全员持有核选装备」的完整对局。"
+    elif scope["match_count"] < 5:
+        result["note"] = "核选装备局样本偏少，排名仅供观察。"
+    else:
+        result["note"] = ""
+    return result
 
 
 def format_active_count_distribution(counter: Counter[int | str]) -> str:
@@ -4857,6 +5257,8 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
             kind="food",
             always_include=FOOD_SPECIAL_EQUIPMENT_NAMES,
         )
+        super_equipment_matches = analyze_super_equipment_matches(features, baseline)
+        selected_equipment_matches = analyze_selected_equipment_matches(features, baseline)
         primary_bond_strength = analyze_primary_bond_strength(
             features,
             args.min_entity_apps,
@@ -4904,6 +5306,14 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 "food_equipment": (
                     "prefix 美味/绝味/暗黑 plus exact names "
                     + "、".join(sorted(FOOD_SPECIAL_EQUIPMENT_NAMES))
+                ),
+                "super_equipment_matches": (
+                    "matches where every retained player owns at least one super equipment; "
+                    f"require >= {MIN_PLAYERS_FOR_EQUIPMENT_MATCH_SCOPE} retained players"
+                ),
+                "selected_equipment_matches": (
+                    "matches where every retained player owns at least one 核选 equipment; "
+                    f"require >= {MIN_PLAYERS_FOR_EQUIPMENT_MATCH_SCOPE} retained players"
                 ),
                 "jiujiu_rule": "X啾啾 adds +1 to bond X when X exists in dict_bond",
                 "primary_bond_rule": (
@@ -4973,6 +5383,8 @@ def build_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 "heroes_and_equipment": hero_equipment,
                 "super_equipment": super_equipment,
                 "food_equipment": food_equipment,
+                "super_equipment_matches": super_equipment_matches,
+                "selected_equipment_matches": selected_equipment_matches,
                 "primary_bond_strength": primary_bond_strength,
                 "jiujiu": jiujiu_analysis,
                 "traps": traps,
@@ -5917,6 +6329,85 @@ def render_md(data: dict[str, Any]) -> str:
     append_special_equipment_md("超级装备强度", "super_equipment", "super-equipment")
     append_special_equipment_md("美食社装备强度", "food_equipment", "food-equipment")
 
+    def append_match_scoped_equipment_md(title: str, section_key: str, anchor: str) -> None:
+        special = data["rankings"].get(section_key, {})
+        rankings = special.get("rankings", [])
+        scope = special.get("scope", {})
+        lines.append(f"### {title}")
+        lines.append("")
+        lines.append(special.get("definition", ""))
+        lines.append("")
+        if scope:
+            lines.append(
+                f"- 对局样本：{scope.get('match_count', 0)} 局 / "
+                f"{scope.get('player_count', 0)} 名已保留玩家"
+                f"（源窗口 {scope.get('source_match_count', 0)} 局；"
+                f"残缺对局排除 {scope.get('incomplete_matches_excluded', 0)}）。"
+            )
+            lines.append("")
+        if special.get("note"):
+            lines.append(f"- 备注：{special['note']}")
+            lines.append("")
+        lines.append(f"完整可排序表格见 **`{interactive_html}#{anchor}`**。")
+        lines.append("")
+        if not rankings:
+            lines.append("- 当前样本不足以形成该分类装备排名。")
+            lines.append("")
+            return
+        include_selected = any(row.get("selected_rate") is not None for row in rankings[:20])
+        if include_selected:
+            lines.append(
+                "| 强度排名 | 装备 | 样本 | 修正名次 | 前四率 | 吃鸡率 | 核选占比 | 置信度 | 推荐佩戴 | 备注 |"
+            )
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |")
+        else:
+            lines.append(
+                "| 强度排名 | 装备 | 样本 | 修正名次 | 前四率 | 吃鸡率 | 置信度 | 推荐佩戴 | 备注 |"
+            )
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | --- | --- | --- |")
+        for row in rankings[:20]:
+            wearers = "、".join(
+                f"{item['hero_name']}(n={item['appearances']})"
+                for item in row.get("recommended_wearers", [])[:3]
+            ) or "待观察"
+            avg_rank = (
+                f"{row['adjusted_avg_rank']:.2f}"
+                if row.get("adjusted_avg_rank") is not None
+                else "—"
+            )
+            top4 = render_pct(row["top4_rate"]) if row.get("top4_rate") is not None else "—"
+            win = render_pct(row["win_rate"]) if row.get("win_rate") is not None else "—"
+            if include_selected:
+                selected = (
+                    render_pct(row["selected_rate"])
+                    if row.get("selected_rate") is not None
+                    else "—"
+                )
+                lines.append(
+                    f"| {row.get('strength_rank', '—')} | {row['equipment_name']} | "
+                    f"{row.get('appearances', 0)} | {avg_rank} | {top4} | {win} | "
+                    f"{selected} | {row.get('confidence', '低')} | {wearers} | "
+                    f"{row.get('note') or '—'} |"
+                )
+            else:
+                lines.append(
+                    f"| {row.get('strength_rank', '—')} | {row['equipment_name']} | "
+                    f"{row.get('appearances', 0)} | {avg_rank} | {top4} | {win} | "
+                    f"{row.get('confidence', '低')} | {wearers} | {row.get('note') or '—'} |"
+                )
+        lines.append("")
+
+    append_match_scoped_equipment_md(
+        "超级装备局强度",
+        "super_equipment_matches",
+        "super-equipment-matches",
+    )
+    append_match_scoped_equipment_md(
+        "核选装备局强度",
+        "selected_equipment_matches",
+        "selected-equipment-matches",
+    )
+
     primary_bond_html = data.get("outputs", {}).get(
         "interactive_html",
         "data/环境分析详情.html",
@@ -6371,6 +6862,232 @@ def render_card_prefix_table_panel(
         headers=headers,
         rows=table_rows,
     )
+
+
+def render_card_composition_block(card_row: dict[str, Any]) -> str:
+    card_name = card_row["card_name"]
+    slug = card_row.get("detail_slug") or card_composition_detail_slug(card_name)
+    comps = card_row.get("recommended_comps") or []
+    if comps:
+        rows_html: list[str] = []
+        for index, comp in enumerate(comps, start=1):
+            notes = "；".join(comp.get("low_confidence_notes") or []) or "—"
+            mature_rank = render_card_metric(comp.get("mature_adjusted_avg_rank"))
+            rows_html.append(
+                "<tr>"
+                f"<td>{index}</td>"
+                f"<td>{html_strategy_cell(comp.get('family_label', '—'))}</td>"
+                f"<td>{esc(comp.get('play_style', '—'))}</td>"
+                f"<td>{comp.get('appearances', 0)}</td>"
+                f"<td>{render_card_metric(comp.get('rank_adjusted_avg_rank'))}</td>"
+                f"<td>{render_pct(comp.get('rank_top4_rate'))}</td>"
+                f"<td>{comp.get('mature_appearances', 0)}</td>"
+                f"<td>{mature_rank}</td>"
+                f"<td>{render_pct(comp.get('share'))}</td>"
+                f"<td>{esc(comp.get('confidence', '—'))}</td>"
+                f"<td class=\"muted\">{esc(notes)}</td>"
+                "</tr>"
+            )
+        body = "\n".join(rows_html)
+    else:
+        body = (
+            '<tr><td colspan="11" class="empty">'
+            "该卡牌尚未形成足够样本的策略级阵容推荐。"
+            "</td></tr>"
+        )
+    return f"""
+    <article class="card-comp-block" id="card-comp-{esc(slug)}" data-card-name="{esc(card_name)}" data-prefix="{esc(card_row.get('prefix_type', ''))}" data-slug="{esc(slug)}">
+      <header class="card-comp-header">
+        <h3>{esc(card_name)}</h3>
+        <div class="sub">
+          {esc(card_row.get('prefix_type', '其他'))}类 ·
+          持卡样本 {card_row.get('appearances', 0)} ·
+          修正名次 {esc(render_card_metric(card_row.get('adjusted_avg_rank')))} ·
+          前四率 {esc(render_pct(card_row.get('top4_rate')))} ·
+          推荐阵容 {len(comps)} 套
+        </div>
+      </header>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>推荐阵容</th>
+              <th>类型</th>
+              <th>持卡样本</th>
+              <th>持卡修正</th>
+              <th>持卡前四</th>
+              <th>成熟样本</th>
+              <th>成熟修正</th>
+              <th>占该卡</th>
+              <th>置信</th>
+              <th>低置信说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            {body}
+          </tbody>
+        </table>
+      </div>
+    </article>
+    """
+
+
+def render_card_composition_recommendations_panel(data: dict[str, Any], *, panel_id: str) -> str:
+    quality = data["overview"]["quality"]
+    generated = data["generated_at"].split("T")[0]
+    cards = data["rankings"].get("cards", {}).get("card_composition_recommendations", [])
+    subtitle = (
+        f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
+        f" · 共 {len(cards)} 张卡"
+    )
+    note = (
+        "按具体卡名独立统计持卡后的策略表现；同一策略成熟/过渡合并展示，"
+        "排序优先成熟阶段持卡表现。可从彩/黄/蓝/白卡排行点击卡名直达。"
+    )
+    prefix_counts = Counter(row.get("prefix_type", "其他") for row in cards)
+    prefix_filters = "".join(
+        f'<button type="button" class="style-filter" data-prefix="{esc(prefix)}">'
+        f"{esc(prefix)} ({prefix_counts.get(prefix, 0)})</button>"
+        for prefix in ("彩", "黄", "蓝", "白")
+    )
+    blocks = "\n".join(render_card_composition_block(row) for row in cards) or (
+        '<p class="empty">当前样本不足，暂无特定卡牌阵容推荐。</p>'
+    )
+    options = ['<option value="">选择卡牌…</option>']
+    for row in cards:
+        label = (
+            f"{row['card_name']} (n={row.get('appearances', 0)}, "
+            f"阵容{len(row.get('recommended_comps') or [])})"
+        )
+        options.append(
+            f'<option value="{esc(row["card_name"])}">{esc(label)}</option>'
+        )
+    return f"""
+  <div class="panel-section card-comp-panel" id="{esc(panel_id)}">
+    <header class="panel-header">
+      <h2>特定卡牌阵容推荐</h2>
+      <div class="sub">{esc(subtitle)}</div>
+      <div class="note">{esc(note)}</div>
+    </header>
+    <div class="pager-bar">
+      <div class="pager-controls">
+        <span class="filter-label">前缀</span>
+        <button type="button" class="style-filter active" data-prefix="all">全部</button>
+        {prefix_filters}
+      </div>
+      <div class="pager-controls">
+        <span class="filter-label">定位</span>
+        <select data-role="card-select">{"".join(options)}</select>
+        <button type="button" class="pager-btn" data-role="clear-card">清除定位</button>
+        <span class="page-status" data-role="card-status">显示全部卡牌</span>
+      </div>
+    </div>
+    <div class="card-comp-blocks" data-role="card-blocks">
+      {blocks}
+    </div>
+  </div>
+  <script>
+(function() {{
+  const panel = document.getElementById({json.dumps(panel_id)});
+  if (!panel) return;
+  const blocks = Array.from(panel.querySelectorAll(".card-comp-block"));
+  const statusEl = panel.querySelector('[data-role="card-status"]');
+  const selectEl = panel.querySelector('[data-role="card-select"]');
+  const clearBtn = panel.querySelector('[data-role="clear-card"]');
+  let activePrefix = "all";
+  let activeCard = "";
+
+  function decodeCardParam(raw) {{
+    if (!raw) return "";
+    try {{
+      return decodeURIComponent(raw);
+    }} catch (err) {{
+      return raw;
+    }}
+  }}
+
+  function applyFilter(scrollIntoView) {{
+    let visible = 0;
+    let focused = null;
+    blocks.forEach((block) => {{
+      const prefixOk = activePrefix === "all" || block.dataset.prefix === activePrefix;
+      const cardOk = !activeCard || block.dataset.cardName === activeCard;
+      const show = prefixOk && cardOk;
+      block.classList.toggle("is-hidden", !show);
+      block.classList.toggle("is-focused", Boolean(activeCard) && block.dataset.cardName === activeCard);
+      if (show) {{
+        visible += 1;
+        if (!focused && activeCard && block.dataset.cardName === activeCard) {{
+          focused = block;
+        }}
+      }}
+    }});
+    if (statusEl) {{
+      if (activeCard) {{
+        statusEl.textContent = visible
+          ? `已定位：${{activeCard}}`
+          : `未找到卡牌：${{activeCard}}`;
+      }} else {{
+        statusEl.textContent = `显示 ${{visible}} / ${{blocks.length}} 张卡`;
+      }}
+    }}
+    if (scrollIntoView && focused) {{
+      focused.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }}
+  }}
+
+  function focusCard(cardName, scrollIntoView) {{
+    activeCard = cardName || "";
+    if (selectEl) {{
+      selectEl.value = activeCard;
+    }}
+    applyFilter(Boolean(scrollIntoView));
+  }}
+
+  panel.querySelectorAll(".style-filter").forEach((button) => {{
+    button.addEventListener("click", () => {{
+      panel.querySelectorAll(".style-filter").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      activePrefix = button.dataset.prefix || "all";
+      applyFilter(false);
+    }});
+  }});
+
+  if (selectEl) {{
+    selectEl.addEventListener("change", () => {{
+      focusCard(selectEl.value || "", true);
+      if (selectEl.value) {{
+        history.replaceState(null, "", `#card-compositions?card=${{encodeURIComponent(selectEl.value)}}`);
+      }} else {{
+        history.replaceState(null, "", "#card-compositions");
+      }}
+    }});
+  }}
+  if (clearBtn) {{
+    clearBtn.addEventListener("click", () => {{
+      focusCard("", false);
+      history.replaceState(null, "", "#card-compositions");
+    }});
+  }}
+
+  panel._focusCardComposition = function(cardName) {{
+    const decoded = decodeCardParam(cardName);
+    if (decoded) {{
+      const prefixBtn = panel.querySelector('.style-filter[data-prefix="all"]');
+      if (prefixBtn) {{
+        panel.querySelectorAll(".style-filter").forEach((item) => item.classList.remove("active"));
+        prefixBtn.classList.add("active");
+        activePrefix = "all";
+      }}
+    }}
+    focusCard(decoded, true);
+  }};
+
+  applyFilter(false);
+}})();
+  </script>
+"""
 
 
 def render_duo_composition_table_panel(data: dict[str, Any], *, panel_id: str) -> str:
@@ -7622,7 +8339,12 @@ def render_equipment_recommendations_panel(data: dict[str, Any], *, panel_id: st
     )
 
 
-def build_special_equipment_table_rows(data: dict[str, Any], section_key: str) -> list[list[dict[str, Any]]]:
+def build_special_equipment_table_rows(
+    data: dict[str, Any],
+    section_key: str,
+    *,
+    include_selected_rate: bool = False,
+) -> list[list[dict[str, Any]]]:
     rows: list[list[dict[str, Any]]] = []
     for item in data["rankings"].get(section_key, {}).get("rankings", []):
         wearers = "、".join(
@@ -7633,39 +8355,50 @@ def build_special_equipment_table_rows(data: dict[str, Any], section_key: str) -
         top4 = item.get("top4_rate")
         win = item.get("win_rate")
         note = item.get("note") or "—"
-        rows.append(
+        cells = [
+            _html_table_cell(str(item.get("strength_rank", "—")), sort_value=item.get("strength_rank", 999)),
+            _html_table_cell(item["equipment_name"], sort_value=item["equipment_name"]),
+            _html_table_cell(str(item.get("appearances", 0)), sort_value=item.get("appearances", 0)),
+            _html_table_cell(
+                f"{item.get('weighted_appearances', 0):.2f}"
+                if item.get("weighted_appearances") is not None
+                else "—",
+                sort_value=item.get("weighted_appearances", 0) or 0,
+            ),
+            _html_table_cell(
+                f"{item.get('n_eff', 0):.2f}" if item.get("n_eff") is not None else "—",
+                sort_value=item.get("n_eff", 0) or 0,
+            ),
+            _html_table_cell(
+                f"{avg_rank:.2f}" if avg_rank is not None else "—",
+                sort_value=avg_rank if avg_rank is not None else 999,
+            ),
+            _html_table_cell(
+                render_pct(top4) if top4 is not None else "—",
+                sort_value=top4 if top4 is not None else -1,
+            ),
+            _html_table_cell(
+                render_pct(win) if win is not None else "—",
+                sort_value=win if win is not None else -1,
+            ),
+        ]
+        if include_selected_rate:
+            selected = item.get("selected_rate")
+            cells.append(
+                _html_table_cell(
+                    render_pct(selected) if selected is not None else "—",
+                    sort_value=selected if selected is not None else -1,
+                )
+            )
+        cells.extend(
             [
-                _html_table_cell(str(item.get("strength_rank", "—")), sort_value=item.get("strength_rank", 999)),
-                _html_table_cell(item["equipment_name"], sort_value=item["equipment_name"]),
-                _html_table_cell(str(item.get("appearances", 0)), sort_value=item.get("appearances", 0)),
-                _html_table_cell(
-                    f"{item.get('weighted_appearances', 0):.2f}"
-                    if item.get("weighted_appearances") is not None
-                    else "—",
-                    sort_value=item.get("weighted_appearances", 0) or 0,
-                ),
-                _html_table_cell(
-                    f"{item.get('n_eff', 0):.2f}" if item.get("n_eff") is not None else "—",
-                    sort_value=item.get("n_eff", 0) or 0,
-                ),
-                _html_table_cell(
-                    f"{avg_rank:.2f}" if avg_rank is not None else "—",
-                    sort_value=avg_rank if avg_rank is not None else 999,
-                ),
-                _html_table_cell(
-                    render_pct(top4) if top4 is not None else "—",
-                    sort_value=top4 if top4 is not None else -1,
-                ),
-                _html_table_cell(
-                    render_pct(win) if win is not None else "—",
-                    sort_value=win if win is not None else -1,
-                ),
                 _html_table_cell(item.get("confidence", "低"), sort_value=item.get("confidence", "")),
                 _html_table_cell(item.get("sample_quality", "—"), sort_value=item.get("sample_quality", "")),
                 _html_table_cell(wearers, sort_value=wearers),
                 _html_table_cell(note, sort_value=note),
             ]
         )
+        rows.append(cells)
     return rows
 
 
@@ -7676,14 +8409,27 @@ def render_special_equipment_table_panel(
     section_key: str,
     title: str,
     note: str,
+    include_selected_rate: bool = False,
 ) -> str:
     quality = data["overview"]["quality"]
     generated = data["generated_at"].split("T")[0]
-    definition = data["rankings"].get(section_key, {}).get("definition", "")
+    section = data["rankings"].get(section_key, {})
+    definition = section.get("definition", "")
+    scope = section.get("scope") or {}
+    scope_note = ""
+    if scope:
+        scope_note = (
+            f"对局样本 {scope.get('match_count', 0)} 局 / "
+            f"{scope.get('player_count', 0)} 名已保留玩家；"
+            f"残缺对局排除 {scope.get('incomplete_matches_excluded', 0)}。"
+        )
+    extra_note = section.get("note") or ""
     subtitle = (
         f"基于 {quality['matches']} 局 / {data['overview']['filtered_players']} 条过滤后玩家记录 · {generated}"
     )
-    full_note = f"{definition} {note}".strip()
+    full_note = " ".join(
+        part for part in (definition, scope_note, extra_note, note) if part
+    ).strip()
     headers = [
         ("强度排名", "numeric"),
         ("装备", "text"),
@@ -7693,18 +8439,28 @@ def render_special_equipment_table_panel(
         ("修正名次", "numeric"),
         ("前四率", "numeric"),
         ("吃鸡率", "numeric"),
-        ("置信度", "text"),
-        ("样本质量", "text"),
-        ("推荐佩戴", "text"),
-        ("备注", "text"),
     ]
+    if include_selected_rate:
+        headers.append(("核选占比", "numeric"))
+    headers.extend(
+        [
+            ("置信度", "text"),
+            ("样本质量", "text"),
+            ("推荐佩戴", "text"),
+            ("备注", "text"),
+        ]
+    )
     return render_sortable_table_panel(
         panel_id=panel_id,
         title=title,
         subtitle=subtitle,
         note=full_note,
         headers=headers,
-        rows=build_special_equipment_table_rows(data, section_key),
+        rows=build_special_equipment_table_rows(
+            data,
+            section_key,
+            include_selected_rate=include_selected_rate,
+        ),
     )
 
 
@@ -7725,6 +8481,27 @@ def render_food_equipment_table_panel(data: dict[str, Any], *, panel_id: str) ->
         section_key="food_equipment",
         title="美食社装备强度排行",
         note="含美味/绝味/暗黑前缀装备及杏仁豆腐、椒盐酥糖、岛好锅；岛好锅若样本极少会强制低置信提示。",
+    )
+
+
+def render_super_equipment_matches_table_panel(data: dict[str, Any], *, panel_id: str) -> str:
+    return render_special_equipment_table_panel(
+        data,
+        panel_id=panel_id,
+        section_key="super_equipment_matches",
+        title="超级装备局强度排行",
+        note="仅统计「全员至少一件超级装备」的完整对局；点击表头可排序。",
+    )
+
+
+def render_selected_equipment_matches_table_panel(data: dict[str, Any], *, panel_id: str) -> str:
+    return render_special_equipment_table_panel(
+        data,
+        panel_id=panel_id,
+        section_key="selected_equipment_matches",
+        title="核选装备局强度排行",
+        note="仅统计「全员至少一件核选装备」的完整对局；强度按归一化核选装备名排序。",
+        include_selected_rate=True,
     )
 
 
@@ -7790,6 +8567,12 @@ def render_html_panels(data: dict[str, Any]) -> dict[str, str]:
         ),
         "food_equipment": render_food_equipment_table_panel(
             data, panel_id="panel-food-equipment"
+        ),
+        "super_equipment_matches": render_super_equipment_matches_table_panel(
+            data, panel_id="panel-super-equipment-matches"
+        ),
+        "selected_equipment_matches": render_selected_equipment_matches_table_panel(
+            data, panel_id="panel-selected-equipment-matches"
         ),
         "cards_cai": render_card_prefix_table_panel(data, "彩", panel_id="panel-cards-cai"),
         "cards_yellow": render_card_prefix_table_panel(data, "黄", panel_id="panel-cards-yellow"),
@@ -8506,6 +9289,89 @@ def render_xlsx(data: dict[str, Any], xlsx_path: Path) -> None:
     _write_xlsx_sheet(ws_super, special_headers, special_rank_rows("super_equipment"))
     ws_food = wb.create_sheet("美食社装备排行")
     _write_xlsx_sheet(ws_food, special_headers, special_rank_rows("food_equipment"))
+
+    def match_scoped_rank_rows(section_key: str, *, include_selected_rate: bool) -> list[list[Any]]:
+        rows: list[list[Any]] = []
+        section = data["rankings"].get(section_key, {})
+        scope = section.get("scope") or {}
+        for item in section.get("rankings", []):
+            wearers = "、".join(
+                f"{wearer['hero_name']}(n={wearer['appearances']})"
+                for wearer in item.get("recommended_wearers", [])[:5]
+            )
+            row = [
+                item.get("strength_rank"),
+                item.get("equipment_name"),
+                item.get("appearances"),
+                item.get("weighted_appearances"),
+                item.get("n_eff"),
+                item.get("adjusted_avg_rank"),
+                item.get("avg_rank"),
+                item.get("top4_rate"),
+                item.get("win_rate"),
+            ]
+            if include_selected_rate:
+                row.append(item.get("selected_rate"))
+            row.extend(
+                [
+                    item.get("confidence"),
+                    item.get("sample_quality"),
+                    wearers,
+                    item.get("note"),
+                    scope.get("match_count"),
+                    scope.get("player_count"),
+                ]
+            )
+            rows.append(row)
+        return rows
+
+    match_scoped_headers = [
+        "强度排名",
+        "装备",
+        "样本",
+        "加权样本",
+        "n_eff",
+        "修正名次",
+        "平均名次",
+        "前四率(%)",
+        "吃鸡率(%)",
+        "置信度",
+        "样本质量",
+        "推荐佩戴",
+        "备注",
+        "对局数",
+        "玩家数",
+    ]
+    selected_match_headers = [
+        "强度排名",
+        "装备",
+        "样本",
+        "加权样本",
+        "n_eff",
+        "修正名次",
+        "平均名次",
+        "前四率(%)",
+        "吃鸡率(%)",
+        "核选占比(%)",
+        "置信度",
+        "样本质量",
+        "推荐佩戴",
+        "备注",
+        "对局数",
+        "玩家数",
+    ]
+    ws_super_matches = wb.create_sheet("超级装备局排行")
+    _write_xlsx_sheet(
+        ws_super_matches,
+        match_scoped_headers,
+        match_scoped_rank_rows("super_equipment_matches", include_selected_rate=False),
+    )
+    ws_selected_matches = wb.create_sheet("核选装备局排行")
+    _write_xlsx_sheet(
+        ws_selected_matches,
+        selected_match_headers,
+        match_scoped_rank_rows("selected_equipment_matches", include_selected_rate=True),
+    )
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(xlsx_path)

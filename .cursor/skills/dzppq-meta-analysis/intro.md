@@ -90,6 +90,9 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - Sticky table headers use `th { top: 0 }` inside `.table-wrap` so they stick to the scroll container top and never offset under the tab bar (which would cover the first data row).
 - Hero equipment panel shows separate columns for normal / super / food recommendations; clicking a hero name opens `data/hero-equipment/<hero>.html` in a new tab with every single item whose raw appearances exceed 10.
 - `#super-equipment` and `#food-equipment` remain independent ranking pages with wearer recommendations.
+- `#super-equipment-matches` ranks super equipment inside matches where every retained player owns at least one super equipment.
+- `#selected-equipment-matches` ranks 核选 equipment inside matches where every retained player owns at least one selected equipment.
+- Both match-scoped pages require at least 6 retained players per match to avoid incomplete OCR lobbies.
 - `write_hero_equipment_pages()` cleans and regenerates `data/hero-equipment/` on every run.
 - `render_xlsx()` writes per-hero equipment, hero super/food recommendations, special equipment rankings, comp carry equipment, common 3-item sets, and low-sample observations.
 - The dashboard should stay interactive and compact; use panel hash anchors to link directly to specific panels.
@@ -106,6 +109,7 @@ Strategy recommendation buckets follow mature-stage `play_style`, not aggregate 
 - Card logic: analysis is hard-limited to 2026-07-27 and later. `analyze_cards()` groups by prefix type via `card_prefix_type()` and `aggregate_key_stats_by_prefix()`, while preserving every detail-OCR-confirmed shared-icon card as its own concrete ranking key. Final-board hero/equipment inference and legacy merged keys must not rewrite 0727+ labels. The `蓝·半步满级` / `蓝·满级玩家` shared template was not detail-captured in 0727, so those slots remain `unknown` until collection starts in 0728.
 - Jiujiu logic: `analyze_jiujiu()`.
 - Super / food equipment ranking: `analyze_special_equipment()`, `is_super_equipment()`, `is_food_equipment()`, `equipment_kind()`.
+- Match-scoped equipment pages: `analyze_super_equipment_matches()`, `analyze_selected_equipment_matches()`, `filter_features_by_match_equipment_scope()`.
 - Duo composition synergy: `analyze_duo_composition_synergy()`.
 - Trap logic and mature-strategy-covered lower-tier bonds: `find_traps()`.
 - Interactive dashboard layout: `render_interactive_html()` and panel render helpers.

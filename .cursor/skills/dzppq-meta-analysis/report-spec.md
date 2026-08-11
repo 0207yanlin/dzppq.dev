@@ -237,7 +237,9 @@ Export the full per-hero equipment tables to `data/latest_meta_analysis_equipmen
 Also publish:
 - Super equipment strength ranking with recommended wearer heroes.
 - Food-club equipment strength ranking with recommended wearer heroes.
-- Markdown anchors back to `#super-equipment` and `#food-equipment`.
+- Super-equipment-match ranking (`超级装备局`): only matches where every retained player owns at least one super equipment; incomplete lobbies with fewer than 6 retained players are excluded.
+- Selected-equipment-match ranking (`核选装备局`): only matches where every retained player owns at least one `核选` equipment; rank by normalized selected item names and keep `selected_rate`.
+- Markdown anchors back to `#super-equipment`, `#food-equipment`, `#super-equipment-matches`, and `#selected-equipment-matches`.
 - Per-hero `detail_items`: every single equipment with raw `appearances > 10` across normal/super/food kinds, including weighted appearances, `n_eff`, weighted avg rank / top4 / top2 / win rate, adjusted avg rank, and selected rate. Summary recommendation columns remain truncated and use their own reliability thresholds.
 - Standalone hero pages: Unicode filenames such as `data/hero-equipment/厨师长.html`, linked from the dashboard with URL-encoded hrefs and `target="_blank" rel="noopener noreferrer"`.
 
@@ -304,14 +306,15 @@ Use this Markdown shape:
 Also write `data/环境分析详情.html`:
 
 - one tabbed dashboard with clickable top-level panels.
-- default panel order: composition recommendations, primary bond strength, equipment, super equipment, food equipment, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
-- support hash navigation such as `#equipment`, `#super-equipment`, `#food-equipment`, `#compositions`, and `#primary-bond`.
+- default panel order: composition recommendations, primary bond strength, equipment, super equipment, food equipment, super-equipment matches, selected-equipment matches, card prefix tables, duo synergy, low-cost 3-star carry difficulty, jiujiu dependency/wearer tables, trap compositions.
+- support hash navigation such as `#equipment`, `#super-equipment`, `#food-equipment`, `#super-equipment-matches`, `#selected-equipment-matches`, `#compositions`, and `#primary-bond`.
 - sortable tables must show the active sort field and direction (`当前按 xxx 升序/降序`).
 - equipment panel keeps cost/trait/search filters and sortable columns, plus separate super/food recommendation columns; default `全部` filters stay neutral via CSS `.active[data-*="all"]`, and only concrete selections use the golden active style via CSS `:not([data-*="all"])`.
 - dashboard CSS declares `color-scheme: dark` and uses muted table/header/chip surfaces so equipment and jiujiu panels stay dark on first paint, not only after filtering.
 - sticky table headers use `th { top: 0 }` so they stick to the `.table-wrap` top; do not use a positive viewport offset such as `top: 64px`, which covers the first data row inside the horizontal scroll container.
 - equipment hero names open standalone pages under `data/hero-equipment/` in a new browser tab; do not embed all per-hero detail sections into the dashboard.
 - super/food equipment panels show strength rank, sample metrics, confidence, recommended wearers, and low-sample notes.
+- super-equipment-match and selected-equipment-match panels reuse the special-equipment table layout, show match-scope sample counts, and keep low-sample notes.
 - composition panel keeps paginated comp detail pages with 7/8/9 board cards and only `赌狗/高费` style filters.
 - do not render zone filters, archetype filters, observation queues, or high-cost ceiling recommendation pages in the dashboard.
 - comp detail cards should show archetype, archetype evidence, mature/transition stats, inversion diagnostics, low-confidence notes, trend, raw/weighted/`n_eff`, confidence evidence, score breakdown, and cluster/merge reasons when present.
@@ -328,6 +331,8 @@ Also write `data/latest_meta_analysis_equipment.xlsx`:
 - sheet `英雄美食社装备推荐`: per-hero food-club equipment recommendations.
 - sheet `超级装备排行`: super equipment strength ranking and recommended wearers.
 - sheet `美食社装备排行`: food-club equipment strength ranking and recommended wearers.
+- sheet `超级装备局排行`: super equipment ranking restricted to matches where every retained player owns at least one super equipment.
+- sheet `核选装备局排行`: selected equipment ranking restricted to matches where every retained player owns at least one `核选` equipment.
 - sheet `阵容主C关键装备`: comp-scoped carry equipment notes.
 - sheet `常见三件套`: common 3-item sets.
 - sheet `低样本观察`: low-sample equipment observations.
