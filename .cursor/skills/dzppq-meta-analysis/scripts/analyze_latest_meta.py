@@ -984,6 +984,39 @@ def food_harvest_evidence(heroes: list[Hero]) -> list[dict[str, Any]]:
     return sorted(evidence, key=lambda item: (item["hero_name"], item["equipment_name"]))
 
 
+def food_harvest_stage_summary(members: list[PlayerFeature]) -> dict[str, Any]:
+    """Summarize food-bond depth separately from board maturity.
+
+    Food equipment identifies the archetype, but the final board may keep,
+    reduce, or fully drop the factual 美食社 bond.  Treating the highest bond
+    tier as maturity incorrectly promotes weak 5-food boards over stronger
+    flexible high-cost boards.
+    """
+    counts = Counter(int(member.trait_totals.get("美食社", 0)) for member in members)
+    endgame_counts = Counter(
+        int(member.trait_totals.get("美食社", 0))
+        for member in members
+        if member.level >= 8
+    )
+    flexible_endgame = [
+        member
+        for member in members
+        if member.level >= 8 and int(member.trait_totals.get("美食社", 0)) < 5
+    ]
+    return {
+        "food_bond_count_distribution": dict(sorted(counts.items())),
+        "endgame_food_bond_count_distribution": dict(sorted(endgame_counts.items())),
+        "endgame_appearances": len(endgame_counts) and sum(endgame_counts.values()) or 0,
+        "flexible_endgame_appearances": len(flexible_endgame),
+        "flexible_endgame_rate": round(
+            len(flexible_endgame) * 100.0 / max(len(members), 1), 1
+        ),
+        "endgame_rate": round(
+            sum(endgame_counts.values()) * 100.0 / max(len(members), 1), 1
+        ),
+    }
+
+
 def analyze_trait_investment(
     heroes: list[Hero],
     active_traits: dict[str, int],
@@ -2058,6 +2091,11 @@ def build_composition_row(
         for signal in member.archetype_signals
         if member.archetype == archetype
     ]
+    food_stage = (
+        food_harvest_stage_summary(members)
+        if archetype == "美食社收菜"
+        else {}
+    )
     carry_requirements = summarize_carry_requirements(members, main_carries)
     # Mature/stage rows that still ask for a low-cost 3-star carry are reroll
     # comps even when a minority of boards look high-cost.
@@ -2104,6 +2142,7 @@ def build_composition_row(
             for name, count in sorted(archetypes.items(), key=lambda item: (-item[1], item[0]))
         ],
         "archetype_signals": archetype_signals[:12],
+        "food_stage": food_stage,
         "trait_investment": {
             "dominant_traits": Counter(
                 member.trait_investment.get("dominant_trait")
@@ -2466,10 +2505,66 @@ def bond_stage_score(row: dict[str, Any]) -> tuple[int, float, float, int]:
     return (tier, carry_complete, n_eff, int(row["stats"]["appearances"]))
 
 
+def food_stage_score(row: dict[str, Any]) -> tuple[int, float, float, float, int]:
+    """Rank food-harvest stages by endgame evidence, not bond depth."""
+    stage = row.get("food_stage") or {}
+    flexible_count = int(stage.get("flexible_endgame_appearances", 0))
+    endgame_rate = float(stage.get("endgame_rate", 0.0))
+    flexible_rate = float(stage.get("flexible_endgame_rate", 0.0))
+    carry_complete = float(row.get("difficulty", {}).get("carry_complete_rate", 0.0))
+    n_eff = float(row.get("stats", {}).get("n_eff", 0.0))
+    return (
+        int(flexible_count > 0),
+        flexible_rate,
+        endgame_rate,
+        carry_complete,
+        n_eff + flexible_count,
+    )
+
+
 def select_mature_stage(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Choose a completed stage without allowing an obvious performance inversion."""
+    is_food_strategy = any(row.get("archetype") == "美食社收菜" for row in rows)
+    if is_food_strategy:
+        food_candidates = [
+            row for row in rows if int((row.get("food_stage") or {}).get(
+                "flexible_endgame_appearances", 0
+            )) > 0
+        ]
+        if food_candidates:
+            selected = max(
+                food_candidates,
+                key=lambda row: (
+                    food_stage_score(row),
+                    -float(row.get("recommendation_score", float("inf"))),
+                    -float(row.get("stats", {}).get("avg_rank", float("inf"))),
+                    float(row.get("stats", {}).get("top4_rate", 0.0)),
+                ),
+            )
+            candidate_audit = [
+                {
+                    "label": row.get("label"),
+                    "bond": row.get("main_bond"),
+                    "food_stage": row.get("food_stage", {}),
+                    "structural_score": list(food_stage_score(row)),
+                    "recommendation_score": row.get("recommendation_score"),
+                    "stats": row.get("stats"),
+                    "selected": row is selected,
+                }
+                for row in sorted(rows, key=food_stage_score, reverse=True)
+            ]
+            return selected, {
+                "method": "food_endgame_evidence_then_performance",
+                "maturity_rule": (
+                    "level>=8 with food_bond_count<5; bond depth is a variant, "
+                    "not a maturity gate"
+                ),
+                "candidates": candidate_audit,
+                "stage_inversion_detected": False,
+                "rejected_higher_tier_stages": [],
+            }
     high_cost_pdd = all(
         row.get("archetype") == "高费拼多多" for row in rows
     )
@@ -2625,6 +2720,7 @@ def merge_comp_strategies(
                 "stats": row["stats"],
                 "difficulty": row["difficulty"],
                 "popularity": row["popularity"],
+                "food_stage": row.get("food_stage", {}),
                 "play_style": row.get("play_style", "高费"),
                 "play_style_breakdown": row.get("play_style_breakdown", []),
                 "member_player_ids": sorted(
@@ -2646,17 +2742,27 @@ def merge_comp_strategies(
             strategy_core_overlap(left, right)
             for left, right in itertools.combinations(rows, 2)
         ]
-        strategy_id = f"{trait_name_from_bond_key(mature['main_bond'])}|{carry_key}"
+        is_food_strategy = mature.get("archetype") == "美食社收菜"
+        strategy_id = (
+            f"美食社收菜|{carry_key}"
+            if is_food_strategy
+            else f"{trait_name_from_bond_key(mature['main_bond'])}|{carry_key}"
+        )
         mature_carry_label = "+".join(
             item["hero_name"] for item in mature.get("main_carries", [])[:2]
         ) or "无核心"
+        strategy_stage_label = (
+            "灵活美食终局"
+            if is_food_strategy
+            else mature["main_bond"]
+        )
         aggregate.update(
             {
                 "strategy_id": strategy_id,
                 "family_id": strategy_index,
                 "label": (
                     f"{mature.get('archetype', aggregate.get('archetype', '未分类'))} / "
-                    f"{mature['main_bond']} / {mature_carry_label}"
+                    f"{strategy_stage_label} / {mature_carry_label}"
                 ),
                 "main_bond": mature["main_bond"],
                 "archetype": mature.get("archetype", aggregate.get("archetype")),
@@ -2672,6 +2778,7 @@ def merge_comp_strategies(
                     "play_style_breakdown": mature.get("play_style_breakdown", []),
                     "carry_requirements": mature.get("carry_requirements", []),
                     "carry_equipment_notes": mature.get("carry_equipment_notes", []),
+                    "food_stage": mature.get("food_stage", {}),
                 },
                 "mature_stage_selection": mature_stage_selection,
                 "stage_inversion_diagnostics": {
@@ -5605,6 +5712,21 @@ def format_mature_transition_lines(comp: dict[str, Any]) -> list[str]:
         )
     elif comp.get("transition_stages"):
         lines.append("- 过渡表现：存在过渡阶段样本，计入成型难度但不单独推荐。")
+    food_stage = (comp.get("mature_stage") or {}).get("food_stage") or {}
+    if food_stage:
+        distribution = "、".join(
+            f"{count}美食{appearances}局"
+            for count, appearances in sorted(
+                food_stage.get("endgame_food_bond_count_distribution", {}).items(),
+                key=lambda item: int(item[0]),
+            )
+        )
+        lines.append(
+            "- 美食终局证据："
+            f"等级>=8 {food_stage.get('endgame_appearances', 0)}局；"
+            f"灵活终局（美食层数<5）{food_stage.get('flexible_endgame_appearances', 0)}局；"
+            f"层数分布 {distribution or '—'}。"
+        )
     return lines
 
 
@@ -7523,6 +7645,21 @@ def html_comp_detail_page(
         if transition_stats and transition_stats.get("appearances")
         else ("存在过渡样本" if comp.get("transition_stages") else "—")
     )
+    food_stage = (comp.get("mature_stage") or {}).get("food_stage") or {}
+    food_stage_text = "—"
+    if food_stage:
+        distribution = "、".join(
+            f"{count}美食{appearances}局"
+            for count, appearances in sorted(
+                food_stage.get("endgame_food_bond_count_distribution", {}).items(),
+                key=lambda item: int(item[0]),
+            )
+        )
+        food_stage_text = (
+            f"等级>=8 {food_stage.get('endgame_appearances', 0)}局 / "
+            f"美食层数<5 {food_stage.get('flexible_endgame_appearances', 0)}局 / "
+            f"层数分布 {distribution or '—'}"
+        )
     screenshot_link = comp.get("raw_screenshot_page")
     screenshot_html = (
         f'<a class="screenshot-link" href="{esc(quote(screenshot_link.removeprefix("data/"), safe="/:@-._~"))}" '
@@ -7575,6 +7712,7 @@ def html_comp_detail_page(
             {expensive_html}
             <p><strong>成熟表现：</strong>{esc(mature_text)}</p>
             <p><strong>过渡表现：</strong>{esc(transition_text)}</p>
+            <p><strong>美食终局证据：</strong>{esc(food_stage_text)}</p>
             <p><strong>成熟/过渡倒挂：</strong>{esc(inversion_text)}</p>
             <p><strong>版本趋势：</strong>{esc(format_trend_detail_text(comp.get('trend')))}</p>
             <p><strong>三星压力：</strong>{esc(star_pressure)}</p>
