@@ -72,6 +72,7 @@ INTERACTIVE_PANELS: list[tuple[str, str, str]] = [
     ("cards-yellow", "黄卡强度排行", "cards_yellow"),
     ("cards-blue", "蓝卡强度排行", "cards_blue"),
     ("cards-white", "白卡强度排行", "cards_white"),
+    ("card-trends", "卡牌表现趋势", "card_trends"),
     ("duo", "双人阵容配合", "duo_compositions"),
     ("low-cost", "低费主C追三难度", "low_cost_carries"),
     ("jiujiu-comps", "啾啾阵容依赖", "jiujiu_comps"),
@@ -3906,6 +3907,9 @@ def analyze_cards(
     teammate_pair_items: list[StatItem] = []
     first_card_duo_items: list[StatItem] = []
     first_with_partner_any_items: list[StatItem] = []
+    card_trend_items: dict[str, dict[str, list[int]]] = defaultdict(
+        lambda: defaultdict(lambda: [0, 0])
+    )
     comp_card_items: dict[int, list[StatItem]] = defaultdict(list)
     family_labels = {row["family_id"]: row["label"] for row in comp_rows}
     by_match_rank = {
@@ -3929,6 +3933,13 @@ def analyze_cards(
         weight = feature.sample_weight
         for card in cards:
             single_items.append((card, feature.rank, weight))
+            batch = feature.match_batch or "unknown"
+            trend = card_trend_items[card][batch]
+            trend[1] += 1
+            if card_prefix_type(card) == "蓝":
+                trend[0] += int((feature.team_rank or team_rank_value(feature)) <= 2)
+            else:
+                trend[0] += int(feature.rank <= 4)
             if card_prefix_type(card) == "蓝":
                 blue_team_rank_items.append((card, team_rank_value(feature), weight))
                 if team_rank_value(feature) <= 2:
@@ -4050,6 +4061,55 @@ def analyze_cards(
                 1,
             )
 
+    single_card_map = {
+        row["key"]: row
+        for row in single_cards
+        if row.get("appearances", 0) > 0
+    }
+    blue_team_map = {
+        row["key"]: row
+        for row in blue_cards_team_rank
+        if row.get("appearances", 0) > 0
+    }
+    all_batches = ordered_batches(features)
+    card_trends: dict[str, dict[str, Any]] = {}
+    for card, batch_map in card_trend_items.items():
+        is_blue = card_prefix_type(card) == "蓝"
+        metric_key = "team_top2_rate" if is_blue else "personal_top4_rate"
+        metric_label = "队伍前二率" if is_blue else "个人前四率"
+        points = []
+        for batch in all_batches:
+            success, appearances = batch_map.get(batch, (0, 0))
+            if not appearances:
+                continue
+            points.append(
+                {
+                    "batch": batch,
+                    "appearances": appearances,
+                    "successes": success,
+                    "rate": round(success * 100.0 / appearances, 1),
+                }
+            )
+        overall = blue_team_map.get(card) if is_blue else single_card_map.get(card)
+        card_trends[card] = {
+            "card_name": card,
+            "prefix_type": card_prefix_type(card),
+            "metric_key": metric_key,
+            "metric_label": metric_label,
+            "batches": all_batches,
+            "points": points,
+            "appearances": sum(point["appearances"] for point in points),
+            "window_weighted_rate": (
+                overall.get(metric_key if is_blue else "top4_rate")
+                if overall
+                else None
+            ),
+            "window_weighted_appearances": (
+                overall.get("weighted_appearances") if overall else None
+            ),
+            "n_eff": overall.get("n_eff") if overall else None,
+        }
+
     return {
         "single_cards": single_cards,
         "single_cards_by_prefix": single_cards_by_prefix,
@@ -4057,6 +4117,7 @@ def analyze_cards(
         "first_card_rankings_by_prefix": first_card_rankings_by_prefix,
         "blue_cards_team_rank": blue_cards_team_rank,
         "blue_cards_team_rank_by_prefix": blue_cards_team_rank_by_prefix,
+        "card_trends": card_trends,
         "card_pairs_observation": aggregate_key_stats(pair_items, max(6, min_apps // 2), baseline)[:20],
         "card_triples_observation": aggregate_key_stats(triple_items, max(5, min_apps // 2), baseline)[:20],
         "teammate_card_pairs_observation": aggregate_key_stats(
@@ -6914,6 +6975,7 @@ def render_card_prefix_table_panel(
         ("平均名次", "numeric"),
         ("前四率", "numeric"),
         ("吃鸡率", "numeric"),
+        ("趋势", "text"),
     ]
     if prefix_type == "蓝":
         headers.extend(
@@ -6954,6 +7016,13 @@ def render_card_prefix_table_panel(
             _html_table_cell(
                 render_pct(row.get("win_rate")),
                 sort_value=row.get("win_rate", -1),
+            ),
+            _html_table_cell(
+                "查看趋势",
+                html=(
+                    f'<button type="button" class="card-trend-btn" '
+                    f'data-card-trend="{esc(row["key"])}">查看趋势</button>'
+                ),
             ),
         ]
         if prefix_type == "蓝":
@@ -7053,6 +7122,144 @@ def render_card_composition_block(card_row: dict[str, Any]) -> str:
       </div>
     </article>
     """
+
+
+def render_card_trends_panel(data: dict[str, Any], *, panel_id: str) -> str:
+    trends = data["rankings"]["cards"].get("card_trends", {})
+    options = [
+        '<option value="">选择卡牌…</option>',
+        *[
+            f'<option value="{esc(card)}">{esc(card)}</option>'
+            for card in sorted(trends)
+        ],
+    ]
+    trend_json = json.dumps(trends, ensure_ascii=False)
+    return f"""
+  <div class="panel-section card-trend-panel" id="{esc(panel_id)}">
+    <header class="panel-header">
+      <h2>卡牌10日表现趋势</h2>
+      <div class="sub">蓝卡使用队伍前二率；其它卡牌使用个人前四率。缺失批次不补0。</div>
+    </header>
+    <div class="card-trend-controls">
+      <label for="{esc(panel_id)}-select">选择卡牌</label>
+      <select id="{esc(panel_id)}-select">{"".join(options)}</select>
+    </div>
+    <div id="{esc(panel_id)}-empty" class="empty">请从卡牌排名表点击“查看趋势”。</div>
+    <div id="{esc(panel_id)}-content" class="card-trend-content" hidden>
+      <h3 id="{esc(panel_id)}-title"></h3>
+      <div id="{esc(panel_id)}-summary" class="sub"></div>
+      <div id="{esc(panel_id)}-chart" class="card-trend-chart"></div>
+    </div>
+  </div>
+  <script>
+(function() {{
+  const panel = document.getElementById({json.dumps(panel_id)});
+  if (!panel) return;
+  const trends = {trend_json};
+  const select = panel.querySelector("select");
+  const empty = panel.querySelector(".empty");
+  const content = panel.querySelector(".card-trend-content");
+  const title = panel.querySelector("h3");
+  const summary = panel.querySelector(".sub");
+  const chart = panel.querySelector(".card-trend-chart");
+
+  function escSvg(value) {{
+    return String(value).replace(/[&<>"]/g, (char) => (
+      {{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }}[char]
+    ));
+  }}
+
+  function renderCard(cardName) {{
+    const item = trends[cardName];
+    if (!item) {{
+      empty.hidden = false;
+      content.hidden = true;
+      return;
+    }}
+    const width = 960;
+    const height = 360;
+    const left = 58;
+    const right = 24;
+    const top = 24;
+    const bottom = 70;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const batches = item.batches || [];
+    const pointsByBatch = new Map((item.points || []).map((point) => [point.batch, point]));
+    const x = (index) => left + (batches.length <= 1 ? plotWidth / 2 : index * plotWidth / (batches.length - 1));
+    const y = (rate) => top + (100 - rate) * plotHeight / 100;
+    const valid = batches
+      .map((batch, index) => (pointsByBatch.has(batch) ? {{ batch, index, point: pointsByBatch.get(batch) }} : null))
+      .filter(Boolean);
+    const segments = [];
+    let segment = [];
+    batches.forEach((batch, index) => {{
+      const point = pointsByBatch.get(batch);
+      if (!point) {{
+        if (segment.length) segments.push(segment);
+        segment = [];
+        return;
+      }}
+      segment.push(`${{x(index).toFixed(1)}},${{y(point.rate).toFixed(1)}}`);
+    }});
+    if (segment.length) segments.push(segment);
+    const grid = [0, 25, 50, 75, 100].map((rate) => {{
+      const yy = y(rate).toFixed(1);
+      return `<line x1="${{left}}" y1="${{yy}}" x2="${{width - right}}" y2="${{yy}}" class="trend-grid"/>` +
+        `<text x="${{left - 10}}" y="${{Number(yy) + 4}}" text-anchor="end" class="trend-axis">${{rate}}%</text>`;
+    }}).join("");
+    const labels = batches.map((batch, index) =>
+      `<text x="${{x(index).toFixed(1)}}" y="${{height - 28}}" text-anchor="middle" class="trend-axis">${{batch}}</text>`
+    ).join("");
+    const line = segments.map((values) => `<polyline points="${{values.join(" ")}}" class="trend-line"/>`).join("");
+    const dots = valid.map((entry) => {{
+      const xx = x(entry.index).toFixed(1);
+      const yy = y(entry.point.rate).toFixed(1);
+      const label = `${{entry.batch}}：${{entry.point.rate}}%（n=${{entry.point.appearances}}）`;
+      return `<circle cx="${{xx}}" cy="${{yy}}" r="5" class="trend-dot"><title>${{escSvg(label)}}</title></circle>`;
+    }}).join("");
+    const note = item.metric_label === "队伍前二率"
+      ? "蓝卡队伍前二率"
+      : "个人前四率";
+    chart.innerHTML = `<svg viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="${{escSvg(cardName)}} ${{note}}趋势">
+      <g>${{grid}}${{labels}}${{line}}${{dots}}</g>
+    </svg>`;
+    title.textContent = `${{cardName}} · ${{note}}`;
+    summary.textContent =
+      `窗口加权${{note}} ${{item.window_weighted_rate ?? "—"}}% · ` +
+      `总样本 ${{item.appearances}} · 加权样本 ${{item.window_weighted_appearances ?? "—"}} · ` +
+      `n_eff ${{item.n_eff ?? "—"}}`;
+    empty.hidden = true;
+    content.hidden = false;
+  }}
+
+  window.showCardTrend = (cardName) => {{
+    if (!trends[cardName]) return;
+    select.value = cardName;
+    renderCard(cardName);
+    if (window.activateDashboardPanel) {{
+      window.activateDashboardPanel("card-trends", false);
+    }}
+    history.replaceState(null, "", `#card-trends?card=${{encodeURIComponent(cardName)}}`);
+    panel.scrollIntoView({{ behavior: "smooth", block: "start" }});
+  }};
+  select.addEventListener("change", () => {{
+    if (select.value) {{
+      window.showCardTrend(select.value);
+    }}
+  }});
+  document.addEventListener("click", (event) => {{
+    const button = event.target.closest("[data-card-trend]");
+    if (button) window.showCardTrend(button.dataset.cardTrend);
+  }});
+  const hashParts = location.hash.replace(/^#/, "").split("?");
+  if (hashParts[0] === "card-trends" && hashParts[1]) {{
+    const cardName = new URLSearchParams(hashParts[1]).get("card");
+    if (cardName && trends[cardName]) window.showCardTrend(cardName);
+  }}
+}})();
+  </script>
+"""
 
 
 def render_card_composition_recommendations_panel(data: dict[str, Any], *, panel_id: str) -> str:
@@ -8716,6 +8923,7 @@ def render_html_panels(data: dict[str, Any]) -> dict[str, str]:
         "cards_yellow": render_card_prefix_table_panel(data, "黄", panel_id="panel-cards-yellow"),
         "cards_blue": render_card_prefix_table_panel(data, "蓝", panel_id="panel-cards-blue"),
         "cards_white": render_card_prefix_table_panel(data, "白", panel_id="panel-cards-white"),
+        "card_trends": render_card_trends_panel(data, panel_id="panel-card-trends"),
         "duo_compositions": render_duo_composition_table_panel(data, panel_id="panel-duo"),
         "low_cost_carries": render_low_cost_carry_table_panel(data, panel_id="panel-low-cost"),
         "jiujiu_comps": render_jiujiu_comps_table_panel(data, panel_id="panel-jiujiu-comps"),
@@ -8797,6 +9005,40 @@ def interactive_dashboard_css() -> str:
       white-space: nowrap;
     }
     .note { color: #94a3b8; font-size: 15px; margin: 8px 0 14px; line-height: 1.45; }
+    .card-trend-controls { display: flex; gap: 10px; align-items: center; margin: 10px 0 16px; }
+    .card-trend-controls label { color: #fde68a; font-weight: 700; }
+    .card-trend-controls select {
+      min-width: 260px;
+      padding: 8px 10px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 8px;
+      background: #182033;
+      color: #e2e8f0;
+    }
+    .card-trend-btn {
+      border: 1px solid rgba(253,230,138,.45);
+      background: rgba(253,230,138,.10);
+      color: #fde68a;
+      border-radius: 999px;
+      padding: 3px 8px;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .card-trend-btn:hover { background: rgba(253,230,138,.22); }
+    .card-trend-chart {
+      width: 100%;
+      overflow-x: auto;
+      padding: 8px 0;
+      background: rgba(15,23,42,.42);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 12px;
+    }
+    .card-trend-chart svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    .trend-grid { stroke: rgba(148,163,184,.22); stroke-width: 1; }
+    .trend-axis { fill: #94a3b8; font-size: 12px; }
+    .trend-line { fill: none; stroke: #fbbf24; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+    .trend-dot { fill: #fde68a; stroke: #111827; stroke-width: 2; }
     .table-wrap {
       overflow-x: auto;
       border: 1px solid rgba(255,255,255,.12);
@@ -9124,9 +9366,10 @@ def render_interactive_html(data: dict[str, Any]) -> str:
       history.replaceState(null, "", `#${{target}}`);
     }}
   }}
+  window.activateDashboardPanel = activatePanel;
 
   function routeHash(rawHash, updateHash) {{
-    const hashKey = (rawHash || "").replace(/^#/, "");
+    const hashKey = (rawHash || "").replace(/^#/, "").split("?")[0];
     if (!hashKey) {{
       activatePanel(panels[0] && panels[0].dataset.hash, updateHash);
       return;
