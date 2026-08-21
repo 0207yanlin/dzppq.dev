@@ -116,8 +116,6 @@ def print_matches(matches: list[MatchHit], *, card_name: str) -> list[Path]:
         print(
             f"[{index}/{len(matches)}] {captured}  {summary}  {match.relative_path}"
         )
-        # Absolute path alone so Windows terminals can Ctrl+Click to open the PNG.
-        print(str(match.absolute_path))
         if not match.absolute_path.is_file():
             missing.append(match.absolute_path)
     return missing

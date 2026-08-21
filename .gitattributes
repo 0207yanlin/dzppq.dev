@@ -3,3 +3,7 @@ data/** filter=lfs diff=lfs merge=lfs -text
 screenshots*/** filter=lfs diff=lfs merge=lfs -text
 dist.zip filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
+screenshots.0816/** filter=lfs diff=lfs merge=lfs -text
+screenshots.0813/** filter=lfs diff=lfs merge=lfs -text
+screenshots.0814/** filter=lfs diff=lfs merge=lfs -text
+screenshots.0815/** filter=lfs diff=lfs merge=lfs -text

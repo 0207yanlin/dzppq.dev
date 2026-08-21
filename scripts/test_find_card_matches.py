@@ -228,7 +228,7 @@ class FindCardMatchesTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("--limit must be a positive integer", stderr.getvalue())
 
-    def test_main_prints_absolute_paths_and_honors_limit(self) -> None:
+    def test_main_prints_relative_paths_and_honors_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shot_dir = root / "screenshots.0705"
@@ -280,7 +280,8 @@ class FindCardMatchesTests(unittest.TestCase):
             self.assertIn("matches=1", output)
             self.assertIn("older.png", output)
             self.assertNotIn("newer.png", output)
-            self.assertIn(str(older.resolve()), output)
+            self.assertIn("screenshots.0705/older.png", output)
+            self.assertNotIn(str(older.resolve()), output)
             self.assertEqual(stderr.getvalue(), "")
 
 
