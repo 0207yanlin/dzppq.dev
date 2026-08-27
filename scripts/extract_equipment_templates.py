@@ -22,6 +22,7 @@ from src.detect_equipment import (  # noqa: E402
     predict_image_with_classifier,
 )
 from src.layout import (  # noqa: E402
+    EQUIPMENT_TEMPLATE_DIR,
     HERO_X_OFFSET,
     HERO_Y_OFFSET,
     NUM_HEROES,
@@ -31,7 +32,7 @@ from src.layout import (  # noqa: E402
     roi_valid,
 )
 
-OUTPUT_DIR = ROOT / "assets" / "templates" / "equipment"
+OUTPUT_DIR = EQUIPMENT_TEMPLATE_DIR
 
 # Absolute x coordinates from the notebook, before adding HERO_X_OFFSET[slot].
 ITEM_BOXES_BY_COUNT = {

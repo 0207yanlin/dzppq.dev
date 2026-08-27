@@ -37,7 +37,7 @@ Do not use older report files as the primary source. Older scripts in `scripts/`
 - Read hero cost and bonds from `config_s2.py`.
 - A bond item named `X啾啾` adds 1 count to bond `X` only when `X` exists in `dict_bond`.
 - Normalize `核选X` and `X` as the same equipment, while keeping selected-rate metrics for upgrade priority.
-- Super equipment is the fixed whitelist: `巫术玩偶` `小鲨包` `金咸鱼` `幸运猫猫` `碰碰气球` `炸炸魔术箱` `发财树` `核桃火箭` `鲱鱼罐头`.
+- Super equipment is the fixed whitelist: `巫术玩偶` `小鲨包` `金咸鱼` `幸运猫猫` `碰碰气球` `炸炸魔术箱` `发财树` `核桃火箭` `鲱鱼罐头` `冰封玫瑰` `存钱罐` `快乐水` `成长骰子` `护身护符` `捣蛋桌球` `时间沙漏` `路障牌` `雪人外套`.
 - Food-club equipment includes normalized names starting with `美味` / `绝味` / `暗黑`, plus exact names `杏仁豆腐` `椒盐酥糖` `岛好锅`; keep `岛好锅` but force low-confidence notes when samples are scarce.
 - Main carry judgment must follow player investment: more equipment, more selected equipment, higher stars, and earlier board slot. Export the top 3 carry candidates per board with explicit priority (`P1`/`P2`/`P3`).
 - Card order is preserved by `slot_index`; the first card (`cards[0]`) is the duo-focused card.

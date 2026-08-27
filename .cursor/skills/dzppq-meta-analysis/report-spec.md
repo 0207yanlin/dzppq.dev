@@ -36,7 +36,7 @@ Apply filtering before all rankings:
 - Normalize equipment names by removing the `核选` prefix.
 - Store `selected_count` and `selected_rate` separately.
 - Equipment upgrade priority is higher when selected-rate is high and rank impact is positive.
-- Super equipment whitelist: `巫术玩偶`, `小鲨包`, `金咸鱼`, `幸运猫猫`, `碰碰气球`, `炸炸魔术箱`, `发财树`, `核桃火箭`, `鲱鱼罐头`.
+- Super equipment whitelist: `巫术玩偶`, `小鲨包`, `金咸鱼`, `幸运猫猫`, `碰碰气球`, `炸炸魔术箱`, `发财树`, `核桃火箭`, `鲱鱼罐头`, `冰封玫瑰`, `存钱罐`, `快乐水`, `成长骰子`, `护身护符`, `捣蛋桌球`, `时间沙漏`, `路障牌`, `雪人外套`.
 - Food-club equipment: normalized names starting with `美味` / `绝味` / `暗黑`, plus exact names `杏仁豆腐`, `椒盐酥糖`, `岛好锅`.
 - Special equipment rankings sort by mature/high-sample preference then adjusted avg rank / top4; low-sample rows stay visible with `低` confidence. `岛好锅` must carry an explicit low-confidence warning when scarce.
 - Per-hero recommendations expose `recommended_items` (normal), `recommended_super_items`, and `recommended_food_items` without duplicating special items into the normal column.

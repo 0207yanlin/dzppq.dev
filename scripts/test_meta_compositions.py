@@ -14,6 +14,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from src.detect_equipment_items import load_equipment_templates  # noqa: E402
+from src.layout import EQUIPMENT_TEMPLATE_DIR  # noqa: E402
+
 SPEC = importlib.util.spec_from_file_location(
     "analyze_latest_meta",
     ROOT / ".cursor/skills/dzppq-meta-analysis/scripts/analyze_latest_meta.py",
@@ -161,6 +164,22 @@ class MetaCompositionTests(unittest.TestCase):
         self.assertTrue(MODULE.is_super_equipment("核选鲱鱼罐头"))
         self.assertEqual(MODULE.equipment_kind("核选鲱鱼罐头"), "super")
         self.assertIn("鲱鱼罐头", MODULE.SUPER_EQUIPMENT_NAMES)
+        for equipment in (
+            "冰封玫瑰",
+            "存钱罐",
+            "快乐水",
+            "成长骰子",
+            "护身护符",
+            "捣蛋桌球",
+            "时间沙漏",
+            "路障牌",
+            "雪人外套",
+        ):
+            with self.subTest(equipment=equipment):
+                self.assertTrue(MODULE.is_super_equipment(equipment))
+                self.assertTrue(MODULE.is_super_equipment(f"核选{equipment}"))
+                self.assertEqual(MODULE.equipment_kind(equipment), "super")
+        self.assertEqual(len(MODULE.SUPER_EQUIPMENT_NAMES), 18)
         self.assertTrue(MODULE.is_food_equipment("核选美味大餐"))
         self.assertTrue(MODULE.is_food_equipment("杏仁豆腐"))
         self.assertTrue(MODULE.is_food_equipment("椒盐酥糖"))
@@ -171,6 +190,16 @@ class MetaCompositionTests(unittest.TestCase):
         # Special bare food names do not by themselves trigger harvest archetype evidence.
         units = [hero("厨师长", equipment="杏仁豆腐")]
         self.assertEqual(MODULE.food_harvest_evidence(units), [])
+
+    def test_every_super_equipment_has_runtime_template(self) -> None:
+        template_labels = {
+            template.label
+            for template in load_equipment_templates(EQUIPMENT_TEMPLATE_DIR)
+        }
+        self.assertTrue(
+            MODULE.SUPER_EQUIPMENT_NAMES <= template_labels,
+            MODULE.SUPER_EQUIPMENT_NAMES - template_labels,
+        )
 
     def test_special_equipment_ranks_wearers_and_marks_low_confidence(self) -> None:
         features = []

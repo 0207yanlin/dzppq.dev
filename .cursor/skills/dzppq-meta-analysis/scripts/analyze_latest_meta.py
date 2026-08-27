@@ -93,6 +93,15 @@ SUPER_EQUIPMENT_NAMES = frozenset(
         "发财树",
         "核桃火箭",
         "鲱鱼罐头",
+        "冰封玫瑰",
+        "存钱罐",
+        "快乐水",
+        "成长骰子",
+        "护身护符",
+        "捣蛋桌球",
+        "时间沙漏",
+        "路障牌",
+        "雪人外套",
     }
 )
 FOOD_SPECIAL_EQUIPMENT_NAMES = frozenset({"杏仁豆腐", "椒盐酥糖", "岛好锅"})
