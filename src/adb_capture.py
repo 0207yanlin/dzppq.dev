@@ -248,6 +248,14 @@ def make_global_match_id(start_time: str, duration: str) -> str:
     return f"{start_time}|{duration}"
 
 
+def extract_start_time_from_match_id(match_id: str) -> str | None:
+    """Extract ``MM-DD HH:MM`` start time from a global match id or fallback dedup key."""
+    for part in match_id.split("|"):
+        if re.fullmatch(r"\d{2}-\d{2} \d{2}:\d{2}", part):
+            return part
+    return None
+
+
 def extract_visible_match_dates(details: list[dict[str, Any]]) -> list[str]:
     dates: list[str] = []
     for item in details:

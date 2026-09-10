@@ -286,6 +286,9 @@ python scripts/capture_daily_screenshots.py --connect --start-rank 1 --end-rank 
 # 断点续跑
 python scripts/capture_daily_screenshots.py --connect --skip-players data/capture_skip_players.json --resume
 
+# 当天增量补采：重扫已完成玩家，已采集对局按开始时间在列表页直接跳过
+python scripts/capture_daily_screenshots.py --connect --rescan-completed
+
 # 重置状态后重跑
 python scripts/capture_daily_screenshots.py --connect --skip-players data/capture_skip_players.json --reset-state
 ```
@@ -302,6 +305,7 @@ python scripts/capture_daily_screenshots.py --connect --skip-players data/captur
 | `--start-rank` / `--end-rank` | `1` / `100` | 排行榜范围 |
 | `--skip-players` | 无 | 手动跳过 rank 列表 JSON |
 | `--resume` / `--reset-state` | 关 | 断点续跑 / 重置状态 |
+| `--rescan-completed` | 关 | 续跑并重扫 completed rank（当天增量补采新对局） |
 | `--dry-run` | 关 | 导航和 OCR，不保存 PNG |
 | `--debug-save-top-players` | `0` | 保存前 N 名玩家的调试截图到 `debug_players/` |
 | `--debug-save-top-matches` | `0` | 保存前 N 名玩家当日去重对局截图到 `runs/<run_id>/debug_matches/`（可与 `--dry-run` 同用） |

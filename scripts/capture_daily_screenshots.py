@@ -60,6 +60,7 @@ from src.adb_capture import (  # noqa: E402
     compute_next_target_rank,
     extract_match_entries,
     extract_ranking_entries,
+    extract_start_time_from_match_id,
     extract_visible_match_dates,
     filter_new_match_entries,
     has_target_date_on_page,
@@ -117,6 +118,7 @@ class CaptureConfig:
     party_review_public_stable_hits: int = 1
     skip_players_path: Path | None = None
     resume: bool = False
+    rescan_completed: bool = False
     reset_state: bool = False
     state_path: Path | None = None
     card_details_workbook: Path = CARD_DETAILS_PATH
@@ -135,6 +137,7 @@ class CaptureStats:
     players_completed: int = 0
     players_skipped_duplicate_rank: int = 0
     players_skipped_manual: int = 0
+    players_rescanned: int = 0
     matches_saved: int = 0
     matches_skipped_duplicate: int = 0
     matches_skipped_duplicate_start_time: int = 0
@@ -196,6 +199,7 @@ class CaptureState:
                 "status": "pending",
                 "skip_reason": None,
                 "match_ids": [],
+                "match_start_times": [],
                 "saved_paths": [],
                 "sidecar_paths": [],
                 "debug_paths": [],
@@ -233,6 +237,20 @@ class CaptureState:
             for match_id in record.get("match_ids", []):
                 match_ids.add(str(match_id))
         return match_ids
+
+    def preload_match_start_times(self) -> dict[int, set[str]]:
+        start_times: dict[int, set[str]] = {}
+        for rank_key, record in self.ranks.items():
+            rank = int(rank_key)
+            times: set[str] = set()
+            for start_time in record.get("match_start_times", []):
+                times.add(str(start_time))
+            for match_id in record.get("match_ids", []):
+                parsed = extract_start_time_from_match_id(str(match_id))
+                if parsed is not None:
+                    times.add(parsed)
+            start_times[rank] = times
+        return start_times
 
 
 def make_run_id(when: datetime | None = None) -> str:
@@ -330,6 +348,8 @@ class DailyCaptureBot:
         self._processed_entry_keys: set[str] = set()
         self._processed_match_ids: set[str] = set()
         self._processed_player_ranks: set[int] = set()
+        self._state_match_start_times: dict[int, set[str]] = {}
+        self._completed_at_resume: set[int] = set()
         self._debug_player_records: list[dict] = []
         self._debug_match_records: list[dict] = []
         self._manual_skip_ranks = load_manual_skip_ranks(config.skip_players_path)
@@ -540,7 +560,7 @@ class DailyCaptureBot:
     def init_capture_state(self) -> None:
         state_path = self.state_path
         if (
-            self.config.resume
+            (self.config.resume or self.config.rescan_completed)
             and not self.config.reset_state
             and state_path.exists()
         ):
@@ -567,18 +587,40 @@ class DailyCaptureBot:
         for rank_str, record in self.capture_state.ranks.items():
             rank = int(rank_str)
             status = str(record.get("status", "pending"))
-            if status in {"completed", "skipped"}:
+            if status == "skipped":
                 self._processed_player_ranks.add(rank)
+            elif status == "completed":
+                if self.config.rescan_completed:
+                    self._completed_at_resume.add(rank)
+                else:
+                    self._processed_player_ranks.add(rank)
         self._processed_match_ids.update(self.capture_state.preload_match_ids())
+        self._state_match_start_times = self.capture_state.preload_match_start_times()
         next_rank = compute_next_target_rank(
             self.config.start_rank,
             self.config.end_rank,
-            completed_ranks=self.capture_state.completed_ranks(),
+            completed_ranks=(
+                set()
+                if self.config.rescan_completed
+                else self.capture_state.completed_ranks()
+            ),
             skipped_ranks=self.capture_state.skipped_ranks(),
             manual_skip_ranks=self._manual_skip_ranks,
         )
         if next_rank is not None:
             self._next_expected_rank = next_rank
+        if self.config.rescan_completed and self._completed_at_resume:
+            self.log_event(
+                "state_rescan",
+                rescan_ranks=sorted(self._completed_at_resume),
+            )
+            if self.config.resolved_target_date() != datetime.now().strftime("%m-%d"):
+                logger.warning(
+                    "rescan-completed with target date %s != today %s; "
+                    "rescan is usually only needed for same-day incremental capture",
+                    self.config.resolved_target_date(),
+                    datetime.now().strftime("%m-%d"),
+                )
 
     def skip_rank_manual(self, rank: int) -> None:
         self.capture_state.set_rank_status(
@@ -649,6 +691,16 @@ class DailyCaptureBot:
             sidecar_paths.append(sidecar_path)
         if debug_path and debug_path not in debug_paths:
             debug_paths.append(debug_path)
+        self.save_state()
+
+    def initial_seen_start_times(self, rank: int) -> set[str]:
+        return set(self._state_match_start_times.get(rank, ()))
+
+    def record_rank_match_start_time(self, rank: int, start_time: str) -> None:
+        record = self.capture_state.get_rank_record(rank)
+        start_times = record.setdefault("match_start_times", [])
+        if start_time not in start_times:
+            start_times.append(start_time)
         self.save_state()
 
     def check_possible_rank_mismatch(
@@ -1014,6 +1066,8 @@ class DailyCaptureBot:
         return entry_wait
 
     def process_player(self, rank: int, player_index: int, x: int, y: int) -> None:
+        if rank in self._completed_at_resume:
+            self.stats.players_rescanned += 1
         if rank < self._next_expected_rank:
             return
         if rank in self._processed_player_ranks:
@@ -1275,7 +1329,13 @@ class DailyCaptureBot:
 
     def process_player_matches(self, rank: int, player_index: int) -> None:
         seen_this_player: set[str] = set()
-        seen_start_times_this_player: set[str] = set()
+        seen_start_times_this_player = self.initial_seen_start_times(rank)
+        if seen_start_times_this_player:
+            self.log_event(
+                "player_start_times_preloaded",
+                rank=rank,
+                count=len(seen_start_times_this_player),
+            )
         no_new_today_swipes = 0
         no_date_swipes = 0
         target_date = self.config.resolved_target_date()
@@ -1399,6 +1459,8 @@ class DailyCaptureBot:
                     entry,
                 )
                 self._processed_entry_keys.add(entry.dedup_key)
+                if saved in {"saved", "duplicate"}:
+                    self.record_rank_match_start_time(rank, entry.normalized_datetime)
                 if saved == "saved":
                     self.stats.matches_saved += 1
                     processed_any_today = True
@@ -1829,6 +1891,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume from capture_state.json, skipping completed/skipped ranks.",
     )
     parser.add_argument(
+        "--rescan-completed",
+        action="store_true",
+        help=(
+            "Resume and re-scan all completed ranks to capture new matches "
+            "played later the same day; already-captured matches are skipped "
+            "on the list page by start time (skipped ranks stay skipped)."
+        ),
+    )
+    parser.add_argument(
         "--state",
         type=Path,
         default=None,
@@ -1868,6 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
         debug_save_top_matches=args.debug_save_top_matches,
         skip_players_path=args.skip_players,
         resume=args.resume,
+        rescan_completed=args.rescan_completed,
         reset_state=args.reset_state,
         state_path=args.state,
         card_details_workbook=args.card_details_workbook,

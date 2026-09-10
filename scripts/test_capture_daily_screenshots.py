@@ -23,6 +23,7 @@ from src.adb_capture import (  # noqa: E402
     compute_next_target_rank,
     extract_match_entries,
     extract_ranking_entries,
+    extract_start_time_from_match_id,
     extract_visible_match_dates,
     filter_new_match_entries,
     has_target_date_on_page,
@@ -1275,6 +1276,100 @@ def test_check_device_reports_all_failures() -> None:
         assert "No healthy adb device found" in message
 
 
+def test_extract_start_time_from_match_id() -> None:
+    assert extract_start_time_from_match_id("07-05 12:16|32:09") == "07-05 12:16"
+    assert extract_start_time_from_match_id("5|1|07-05 12:16|430") == "07-05 12:16"
+    assert extract_start_time_from_match_id("garbage") is None
+    assert extract_start_time_from_match_id("") is None
+
+
+def test_preload_match_start_times_backfill() -> None:
+    from scripts.capture_daily_screenshots import CaptureState
+
+    state = CaptureState.new(
+        run_id="20260705-120000",
+        target_date="07-05",
+        start_rank=1,
+        end_rank=20,
+    )
+    explicit = state.get_rank_record(3)
+    explicit["match_start_times"] = ["07-05 09:30"]
+    explicit["match_ids"] = ["07-05 08:00|30:01"]
+    global_id = state.get_rank_record(5)
+    global_id["match_ids"] = ["07-05 12:16|32:09"]
+    fallback_key = state.get_rank_record(7)
+    fallback_key["match_ids"] = ["5|1|07-05 12:40|430"]
+    unparsable = state.get_rank_record(9)
+    unparsable["match_ids"] = ["garbage"]
+
+    start_times = state.preload_match_start_times()
+
+    assert start_times[3] == {"07-05 09:30", "07-05 08:00"}
+    assert start_times[5] == {"07-05 12:16"}
+    assert start_times[7] == {"07-05 12:40"}
+    assert start_times.get(9, set()) == set()
+    assert all(isinstance(rank, int) for rank in start_times)
+
+
+def test_rescan_completed_preload_reprocesses_completed() -> None:
+    from scripts.capture_daily_screenshots import CaptureState, DailyCaptureBot, CaptureConfig
+
+    state = CaptureState.new(
+        run_id="20260705-120000",
+        target_date="07-05",
+        start_rank=1,
+        end_rank=20,
+    )
+    for rank in range(1, 17):
+        state.set_rank_status(rank, "completed")
+        record = state.get_rank_record(rank)
+        record["match_ids"] = [f"07-05 12:{rank:02d}|32:09"]
+    state.set_rank_status(17, "pending")
+    state.set_rank_status(18, "skipped", skip_reason="private_profile")
+
+    config = CaptureConfig(
+        output_dir=ROOT / "screenshots.test",
+        start_rank=1,
+        end_rank=20,
+        rescan_completed=True,
+    )
+    bot = DailyCaptureBot(config)
+    bot.capture_state = state
+    bot.run_id = state.run_id
+    bot.preload_from_state()
+
+    assert 1 not in bot._processed_player_ranks
+    assert 16 not in bot._processed_player_ranks
+    assert 1 in bot._completed_at_resume
+    assert 16 in bot._completed_at_resume
+    assert 18 in bot._processed_player_ranks
+    assert 18 not in bot._completed_at_resume
+    assert bot._next_expected_rank == 1
+    assert "07-05 12:16|32:09" in bot._processed_match_ids
+    assert any(event["event"] == "state_rescan" for event in bot.events)
+
+
+def test_record_rank_match_start_time_dedup(tmp_path: Path) -> None:
+    import json
+
+    from scripts.capture_daily_screenshots import CaptureConfig, DailyCaptureBot
+
+    config = CaptureConfig(output_dir=tmp_path)
+    bot = DailyCaptureBot(config)
+    bot.run_id = "20260705-test"
+
+    bot.record_rank_match_start_time(5, "07-05 12:16")
+    bot.record_rank_match_start_time(5, "07-05 12:16")
+
+    record = bot.capture_state.get_rank_record(5)
+    assert record["match_start_times"] == ["07-05 12:16"]
+
+    state_path = tmp_path / "capture_state.json"
+    assert state_path.exists()
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["ranks"]["5"]["match_start_times"] == ["07-05 12:16"]
+
+
 def test_has_profile_party_review_entry_uses_new_roi() -> None:
     import numpy as np
 
@@ -1509,4 +1604,7 @@ if __name__ == "__main__":
     test_open_party_review_retries_tap_when_still_on_profile()
     test_open_party_review_no_tap_when_entry_missing()
     test_get_screen_size_error_includes_serial()
+    test_extract_start_time_from_match_id()
+    test_preload_match_start_times_backfill()
+    test_rescan_completed_preload_reprocesses_completed()
     print("all tests passed")
