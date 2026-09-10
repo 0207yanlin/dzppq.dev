@@ -307,11 +307,13 @@ def test_resolution_constants() -> None:
     from src.adb_capture import (
         PROFILE_PARTY_REVIEW_ENTRY_BOX,
         TAP_PROFILE_PARTY_REVIEW,
+        TAP_PROFILE_PARTY_REVIEW_PREP,
     )
 
     assert EXPECTED_WM_SIZE == (1600, 2160)
     assert EXPECTED_SCREENSHOT_SIZE == (2160, 1600)
     assert PROFILE_PARTY_REVIEW_ENTRY_BOX == (510, 450, 700, 550)
+    assert TAP_PROFILE_PARTY_REVIEW_PREP == (2050, 300)
     assert TAP_PROFILE_PARTY_REVIEW == (600, 500)
 
 
@@ -1340,6 +1342,7 @@ def test_open_party_review_retries_tap_when_still_on_profile() -> None:
         ProfilePartyReviewEntryWaitResult,
         SCREEN_PROFILE,
         TAP_PROFILE_PARTY_REVIEW,
+        TAP_PROFILE_PARTY_REVIEW_PREP,
     )
 
     config = CaptureConfig(output_dir=ROOT / "screenshots.test")
@@ -1378,8 +1381,13 @@ def test_open_party_review_retries_tap_when_still_on_profile() -> None:
 
     entry_result, party_result = bot.open_party_review(rank=23)
 
-    assert len(taps) == 2
-    assert taps == [TAP_PROFILE_PARTY_REVIEW, TAP_PROFILE_PARTY_REVIEW]
+    assert len(taps) == 4
+    assert taps == [
+        TAP_PROFILE_PARTY_REVIEW_PREP,
+        TAP_PROFILE_PARTY_REVIEW,
+        TAP_PROFILE_PARTY_REVIEW_PREP,
+        TAP_PROFILE_PARTY_REVIEW,
+    ]
     assert TAP_PROFILE_PARTY_REVIEW == (600, 500)
     assert (200, 400) not in taps
     assert entry_result.stable is True

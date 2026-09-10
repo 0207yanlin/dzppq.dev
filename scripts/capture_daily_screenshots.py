@@ -42,6 +42,7 @@ from src.adb_capture import (  # noqa: E402
     TAP_MAIN_TO_TRANSIT,
     TAP_MATCH_ENTRY_X,
     TAP_PROFILE_PARTY_REVIEW,
+    TAP_PROFILE_PARTY_REVIEW_PREP,
     TAP_RANKING_STEP1,
     TAP_RANKING_STEP2,
     TAP_SWITCH_SOLO_RANK,
@@ -964,6 +965,7 @@ class DailyCaptureBot:
                 # Hidden entry or left profile — never blind-tap (600, 500).
                 return entry_wait, None
 
+            self.adb.tap(*TAP_PROFILE_PARTY_REVIEW_PREP, delay=0)
             self.adb.tap(*TAP_PROFILE_PARTY_REVIEW, delay=0)
             party_wait = self.screen.wait_for_party_review(
                 self.adb,

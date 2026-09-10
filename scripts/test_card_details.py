@@ -39,6 +39,7 @@ ASSETS = (
     "黄·摇盒高手",
     "黄·终极反击",
     "黄·蛋商银行",
+    "黄·未卜先知pro",
     "彩·普通卡",
 )
 
@@ -69,7 +70,7 @@ class CardDetailsWorkbookTests(unittest.TestCase):
             self.workbook_path,
             template_dir=self.template_dir,
         )
-        self.assertEqual(counts, {"白": 6, "蓝": 9, "黄": 10, "彩": 1, "同模板组合": 11})
+        self.assertEqual(counts, {"白": 6, "蓝": 9, "黄": 12, "彩": 1, "同模板组合": 12})
         self.assertEqual(
             loaded.same_template_candidates["白·中坚力量"],
             ("白·中坚力量", "白·威力代价", "白·后院"),
@@ -102,6 +103,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
             loaded.same_template_candidates["黄·蛋商银行"],
             ("黄·大亨", "黄·蛋商银行"),
         )
+        self.assertEqual(
+            loaded.same_template_candidates["黄·未卜先知pro"],
+            ("黄·城墙", "黄·未卜先知pro"),
+        )
         # Candidate names remain real names; CARD_LABEL_ALIASES is not applied.
         self.assertIn("蓝·最佳拍档", loaded.by_color["蓝"])
         self.assertIn("蓝·最强支援", loaded.by_color["蓝"])
@@ -126,6 +131,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             mapping["黄·蛋商银行"],
             ("黄·大亨", "黄·蛋商银行"),
+        )
+        self.assertEqual(
+            mapping["黄·未卜先知pro"],
+            ("黄·城墙", "黄·未卜先知pro"),
         )
         self.assertEqual(
             mapping["白·中坚力量"],
@@ -228,6 +237,10 @@ class CardDetailsWorkbookTests(unittest.TestCase):
         self.assertEqual(
             loaded.same_template_candidates["黄·巨神兵"],
             ("黄·巨神兵", "黄·迅迅迅捷双剑"),
+        )
+        self.assertEqual(
+            loaded.same_template_candidates["黄·未卜先知pro"],
+            ("黄·城墙", "黄·未卜先知pro"),
         )
         self.assertEqual(
             loaded.same_template_candidates["蓝·半步满级+满级玩家"],
